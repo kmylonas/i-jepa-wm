@@ -1,0 +1,16 @@
+*.swp
+*.swo
+__pycache__/
+.DS_Store
+.vscode/
+
+# Checkpoints and datasets
+src/checkpoints/
+data/
+src/datasets/release_dataset/
+src/datasets/something-something-v2/
+src/mylonas_ijepa_wm/raw/
+
+# Generated results
+ijepa_cache/
+*.npy
