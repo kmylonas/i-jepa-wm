@@ -1,6 +1,7 @@
 import argparse
 from collections import OrderedDict
 from pathlib import Path
+import time
 
 import torch
 import numpy as np
@@ -63,6 +64,18 @@ def parse_args(argv=None):
         "--device",
         choices=["auto", "cpu", "cuda", "mps"],
         default="auto",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=["auto", "fp32", "bf16"],
+        default="auto",
+        help="Use BF16 automatically on supported CUDA GPUs.",
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Compile the model with torch.compile.",
     )
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument(
@@ -239,7 +252,14 @@ class WorldModelDataset(torch.utils.data.Dataset):
         }
 
 
-def run_epoch(model, data_loader, device, optimizer=None, log_every=0):
+def run_epoch(
+    model,
+    data_loader,
+    device,
+    optimizer=None,
+    log_every=0,
+    precision="fp32",
+):
     is_training = optimizer is not None
 
     if is_training:
@@ -247,9 +267,12 @@ def run_epoch(model, data_loader, device, optimizer=None, log_every=0):
     else:
         model.eval()
 
-    total_loss = 0.0
+    total_loss = torch.zeros((), device=device)
     total_samples = 0
     loss_fn = torch.nn.MSELoss()
+    non_blocking = device.type == "cuda"
+    last_log_step = 0
+    last_log_time = time.perf_counter()
 
     context = torch.enable_grad() if is_training else torch.inference_mode()
 
@@ -258,37 +281,60 @@ def run_epoch(model, data_loader, device, optimizer=None, log_every=0):
             input_latents = batch["input_latents"].to(
                 device=device,
                 dtype=torch.float32,
+                non_blocking=non_blocking,
             )
             actions = batch["actions"].to(
                 device=device,
                 dtype=torch.float32,
+                non_blocking=non_blocking,
             )
             target_latents = batch["target_latents"].to(
                 device=device,
                 dtype=torch.float32,
+                non_blocking=non_blocking,
             )
 
             if is_training:
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
-            predicted_latents = model(input_latents, actions)
-            loss = loss_fn(predicted_latents, target_latents)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=precision == "bf16",
+            ):
+                predicted_latents = model(input_latents, actions)
+
+            loss = loss_fn(
+                predicted_latents.float(),
+                target_latents,
+            )
 
             if is_training:
                 loss.backward()
                 optimizer.step()
 
             batch_size = input_latents.shape[0]
-            total_loss += loss.item() * batch_size
+            total_loss.add_(loss.detach(), alpha=batch_size)
             total_samples += batch_size
 
             if is_training and log_every > 0 and step % log_every == 0:
-                print(f"  step {step}: loss={loss.item():.6f}")
+                current_loss = loss.detach().item()
+                current_time = time.perf_counter()
+                steps_per_second = (
+                    (step - last_log_step)
+                    / (current_time - last_log_time)
+                )
+                print(
+                    f"  step {step}: loss={current_loss:.6f} "
+                    f"steps/s={steps_per_second:.2f}"
+                )
+                last_log_step = step
+                last_log_time = current_time
 
     if total_samples == 0:
         raise ValueError("data loader is empty")
 
-    return total_loss / total_samples
+    return total_loss.item() / total_samples
 
 
 def save_checkpoint(
@@ -382,6 +428,7 @@ def train_model(
     best_val_loss=float("inf"),
     history=None,
     checkpoint_metadata=None,
+    precision="fp32",
 ):
     if validate_every < 1:
         raise ValueError("validate_every must be at least 1")
@@ -402,6 +449,7 @@ def train_model(
             device,
             optimizer=optimizer,
             log_every=log_every,
+            precision=precision,
         )
         history["train_loss"].append({
             "epoch": epoch,
@@ -415,7 +463,12 @@ def train_model(
 
         val_loss = None
         if should_validate:
-            val_loss = run_epoch(model, val_loader, device)
+            val_loss = run_epoch(
+                model,
+                val_loader,
+                device,
+                precision=precision,
+            )
             history["val_loss"].append({
                 "epoch": epoch,
                 "loss": val_loss,
@@ -465,6 +518,34 @@ def resolve_device(device_name):
         raise RuntimeError("MPS was requested but is not available")
 
     return torch.device(device_name)
+
+
+def resolve_precision(precision, device, bf16_supported=None):
+    if bf16_supported is None:
+        bf16_supported = (
+            device.type == "cuda"
+            and torch.cuda.is_bf16_supported()
+        )
+
+    if precision == "auto":
+        return "bf16" if bf16_supported else "fp32"
+
+    if precision == "bf16" and not bf16_supported:
+        raise ValueError(
+            "BF16 precision requires a CUDA GPU with BF16 support"
+        )
+
+    return precision
+
+
+def compile_model(model, enabled, backend=None):
+    if enabled:
+        compile_arguments = {}
+        if backend is not None:
+            compile_arguments["backend"] = backend
+        model.compile(**compile_arguments)
+
+    return model
 
 
 def set_seed(seed):
@@ -558,6 +639,10 @@ def main(argv=None):
 
     device = resolve_device(args.device)
     args.device = device.type
+    precision = resolve_precision(args.precision, device)
+
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
 
     train_ids, val_ids, test_ids = create_episode_splits(
         num_episodes=args.num_episodes,
@@ -643,7 +728,11 @@ def main(argv=None):
         )
         print(f"Resuming from epoch {start_epoch + 1}")
 
+    model = compile_model(model, enabled=args.compile)
+
     print(f"Using device: {device}")
+    print(f"Using precision: {precision}")
+    print(f"Model compilation: {args.compile}")
     print(
         "Samples: "
         f"train={len(train_loader.dataset)}, "
@@ -665,6 +754,7 @@ def main(argv=None):
         best_val_loss=best_val_loss,
         history=history,
         checkpoint_metadata=checkpoint_metadata,
+        precision=precision,
     )
 
     best_checkpoint_path = args.output_dir / "best.pt"
@@ -679,7 +769,12 @@ def main(argv=None):
         weights_only=True,
     )
     model.load_state_dict(best_checkpoint["model"])
-    test_loss = run_epoch(model, test_loader, device)
+    test_loss = run_epoch(
+        model,
+        test_loader,
+        device,
+        precision=precision,
+    )
 
     torch.save(
         {

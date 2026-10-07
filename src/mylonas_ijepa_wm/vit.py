@@ -1,5 +1,6 @@
 from torch import nn
 import torch
+import torch.nn.functional as F
 
 
 def create_block_causal_mask(num_hist: int, num_patches: int):
@@ -127,19 +128,14 @@ class MultiHeadAttention(nn.Module):
             self.head_dim
         ).transpose(2,1)
 
-        scores = torch.matmul(Q, K.transpose(-2,-1))
-        scores = scores * self.scale
-
-        if attn_mask is not None:
-            scores = scores.masked_fill(
-                ~attn_mask,
-                float("-inf"),
-            )
-
-        attn_weights = torch.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        out = torch.matmul(attn_weights, V) #(B, num_heads, N, head_dim)
+        out = F.scaled_dot_product_attention(
+            Q,
+            K,
+            V,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            scale=self.scale,
+        )
         out = out.transpose(2, 1) #(B, N, num_heads, head_dim)
         out = out.reshape(batch_size, num_tokens, embed_dim)
 
