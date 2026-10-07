@@ -1,5 +1,6 @@
 import argparse
 from collections import OrderedDict
+import multiprocessing
 from pathlib import Path
 import time
 
@@ -79,6 +80,15 @@ def parse_args(argv=None):
     )
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument(
+        "--preload-latents",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Load each split's latent episodes into system RAM before "
+            "training instead of memory-mapping them on demand."
+        ),
+    )
+    parser.add_argument(
         "--normalize-actions",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -157,6 +167,7 @@ class WorldModelDataset(torch.utils.data.Dataset):
         action_mean=None,
         action_std=None,
         episode_cache_size=8,
+        preload_latents=False,
     ):
         self.latent_dir = Path(latent_dir)
         self.trajectory_dir = Path(trajectory_dir)
@@ -164,6 +175,7 @@ class WorldModelDataset(torch.utils.data.Dataset):
         self.action_mean = action_mean
         self.action_std = action_std
         self.episode_cache_size = episode_cache_size
+        self.preload_latents = preload_latents
 
         assert (action_mean is None) == (action_std is None)
         if episode_cache_size < 1:
@@ -177,7 +189,19 @@ class WorldModelDataset(torch.utils.data.Dataset):
             latent_path = (
                 self.latent_dir / f"episode_{episode_id:04d}.npy"
             )
-            num_frames = len(np.load(latent_path, mmap_mode="r"))
+            if self.preload_latents:
+                latents = np.load(
+                    latent_path,
+                    allow_pickle=False,
+                ).astype(np.float16, copy=False)
+                self._latent_cache[episode_id] = latents
+            else:
+                latents = np.load(
+                    latent_path,
+                    mmap_mode="r",
+                    allow_pickle=False,
+                )
+            num_frames = len(latents)
 
             trajectory_path = (
                 self.trajectory_dir / f"episode_{episode_id:04d}.pt"
@@ -226,15 +250,10 @@ class WorldModelDataset(torch.utils.data.Dataset):
 
         end = start + self.num_hist
 
-        input_latents = np.array(
-            latents[start:end],
+        latent_window = np.array(
+            latents[start:end + 1],
             copy=True,
-          )
-
-        target_latents = np.array(
-            latents[start + 1:end + 1],
-            copy=True,
-            )
+        )
 
         actions = self.actions[episode_id][start:end]
 
@@ -244,11 +263,10 @@ class WorldModelDataset(torch.utils.data.Dataset):
             ) / self.action_std
 
         return {
-            # (num_hist, 256, 1280)
-            "input_latents": torch.from_numpy(input_latents),
+            # (num_hist + 1, 256, 1280)
+            "latent_window": torch.from_numpy(latent_window),
             # (num_hist, 5x2=10), where 5 is the frame skip
             "actions": actions,
-            "target_latents": torch.from_numpy(target_latents),
         }
 
 
@@ -278,17 +296,14 @@ def run_epoch(
 
     with context:
         for step, batch in enumerate(data_loader, start=1):
-            input_latents = batch["input_latents"].to(
+            latent_window = batch["latent_window"].to(
                 device=device,
                 dtype=torch.float32,
                 non_blocking=non_blocking,
             )
+            input_latents = latent_window[:, :-1]
+            target_latents = latent_window[:, 1:]
             actions = batch["actions"].to(
-                device=device,
-                dtype=torch.float32,
-                non_blocking=non_blocking,
-            )
-            target_latents = batch["target_latents"].to(
                 device=device,
                 dtype=torch.float32,
                 non_blocking=non_blocking,
@@ -556,6 +571,23 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def resolve_num_workers(
+    num_workers,
+    preload_latents,
+    start_method=None,
+):
+    if num_workers == 0 or not preload_latents:
+        return num_workers
+
+    if start_method is None:
+        start_method = multiprocessing.get_start_method()
+
+    if start_method != "fork":
+        return 0
+
+    return num_workers
+
+
 def create_data_loaders(
     args,
     train_ids,
@@ -570,6 +602,7 @@ def create_data_loaders(
         "num_hist": args.num_hist,
         "action_mean": action_mean,
         "action_std": action_std,
+        "preload_latents": args.preload_latents,
     }
 
     train_dataset = WorldModelDataset(
@@ -586,11 +619,21 @@ def create_data_loaders(
     )
 
     generator = torch.Generator().manual_seed(args.seed)
+    loader_num_workers = resolve_num_workers(
+        args.num_workers,
+        args.preload_latents,
+    )
+    if loader_num_workers != args.num_workers:
+        print(
+            "Preloaded NumPy arrays cannot be shared by spawn-based "
+            "workers; using num_workers=0."
+        )
+
     loader_arguments = {
         "batch_size": args.batch_size,
-        "num_workers": args.num_workers,
+        "num_workers": loader_num_workers,
         "pin_memory": args.device == "cuda",
-        "persistent_workers": args.num_workers > 0,
+        "persistent_workers": loader_num_workers > 0,
     }
 
     train_loader = torch.utils.data.DataLoader(
@@ -733,6 +776,7 @@ def main(argv=None):
     print(f"Using device: {device}")
     print(f"Using precision: {precision}")
     print(f"Model compilation: {args.compile}")
+    print(f"Preloaded latents: {args.preload_latents}")
     print(
         "Samples: "
         f"train={len(train_loader.dataset)}, "
