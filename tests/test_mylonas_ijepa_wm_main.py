@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.mylonas_ijepa_wm.main import process_episode
+from mylonas_ijepa_wm.embed_frames import process_episode
 
 
 class FakeEncoder(torch.nn.Module):

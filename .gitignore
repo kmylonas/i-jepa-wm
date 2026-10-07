@@ -10,6 +10,8 @@ data/
 src/datasets/release_dataset/
 src/datasets/something-something-v2/
 src/mylonas_ijepa_wm/raw/
+src/mylonas_ijepa_wm/raw/ijepa_cache
+tests/*
 
 # Generated results
 ijepa_cache/
