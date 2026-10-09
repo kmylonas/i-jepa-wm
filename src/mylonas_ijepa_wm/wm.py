@@ -51,6 +51,24 @@ def parse_args(argv=None):
 
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
+        "--rollout-steps",
+        type=int,
+        default=1,
+        help=(
+            "Number of autoregressive future steps used by each sample. "
+            "Use 3 when fine-tuning a one-step model with a K=3 loss."
+        ),
+    )
+    parser.add_argument(
+        "--rollout-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of the autoregressive rollout MSE added to the "
+            "original one-step MSE."
+        ),
+    )
+    parser.add_argument(
         "--epochs",
         type=int,
         default=100,
@@ -93,10 +111,20 @@ def parse_args(argv=None):
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument(
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument(
         "--resume",
         action="store_true",
         help="Resume at the next epoch using OUTPUT_DIR/last.pt.",
+    )
+    checkpoint_group.add_argument(
+        "--finetune-from",
+        type=Path,
+        default=None,
+        help=(
+            "Initialize only the model weights from a checkpoint. A fresh "
+            "optimizer, history, epoch count, and best loss are used."
+        ),
     )
 
     return parser.parse_args(argv)
@@ -168,6 +196,7 @@ class WorldModelDataset(torch.utils.data.Dataset):
         action_std=None,
         episode_cache_size=8,
         preload_latents=False,
+        rollout_steps=1,
     ):
         self.latent_dir = Path(latent_dir)
         self.trajectory_dir = Path(trajectory_dir)
@@ -176,10 +205,13 @@ class WorldModelDataset(torch.utils.data.Dataset):
         self.action_std = action_std
         self.episode_cache_size = episode_cache_size
         self.preload_latents = preload_latents
+        self.rollout_steps = rollout_steps
 
         assert (action_mean is None) == (action_std is None)
         if episode_cache_size < 1:
             raise ValueError("episode_cache_size must be at least 1")
+        if rollout_steps < 1:
+            raise ValueError("rollout_steps must be at least 1")
 
         self.samples = []
         self.actions = {}
@@ -221,7 +253,8 @@ class WorldModelDataset(torch.utils.data.Dataset):
 
             self.actions[episode_id] = actions
 
-            for start in range(num_frames - num_hist):
+            num_samples = num_frames - num_hist - rollout_steps + 1
+            for start in range(num_samples):
                 self.samples.append((episode_id, start))
 
     def __len__(self):
@@ -248,14 +281,15 @@ class WorldModelDataset(torch.utils.data.Dataset):
 
         latents = self.load_latents(episode_id)
 
-        end = start + self.num_hist
+        latent_end = start + self.num_hist + self.rollout_steps
+        action_end = latent_end - 1
 
         latent_window = np.array(
-            latents[start:end + 1],
+            latents[start:latent_end],
             copy=True,
         )
 
-        actions = self.actions[episode_id][start:end]
+        actions = self.actions[episode_id][start:action_end]
 
         if self.action_mean is not None:
             actions = (
@@ -263,11 +297,77 @@ class WorldModelDataset(torch.utils.data.Dataset):
             ) / self.action_std
 
         return {
-            # (num_hist + 1, 256, 1280)
+            # (num_hist + rollout_steps, 256, 1280)
             "latent_window": torch.from_numpy(latent_window),
-            # (num_hist, 5x2=10), where 5 is the frame skip
+            # (num_hist + rollout_steps - 1, 5x2=10)
             "actions": actions,
         }
+
+
+def compute_world_model_loss(
+    model,
+    latent_window,
+    actions,
+    num_hist,
+    rollout_steps=1,
+    rollout_loss_weight=0.0,
+):
+    if rollout_steps < 1:
+        raise ValueError("rollout_steps must be at least 1")
+    if rollout_loss_weight < 0.0:
+        raise ValueError("rollout_loss_weight cannot be negative")
+
+    expected_latents = num_hist + rollout_steps
+    expected_actions = expected_latents - 1
+    if latent_window.shape[1] != expected_latents:
+        raise ValueError(
+            f"Expected {expected_latents} latent frames, got "
+            f"{latent_window.shape[1]}"
+        )
+    if actions.shape[1] != expected_actions:
+        raise ValueError(
+            f"Expected {expected_actions} actions, got {actions.shape[1]}"
+        )
+
+    loss_fn = torch.nn.MSELoss()
+    input_latents = latent_window[:, :num_hist]
+    input_actions = actions[:, :num_hist]
+    one_step_targets = latent_window[:, 1:num_hist + 1]
+
+    predicted_latents = model(input_latents, input_actions)
+    one_step_loss = loss_fn(
+        predicted_latents.float(),
+        one_step_targets,
+    )
+
+    next_latent = predicted_latents[:, -1]
+    rollout_predictions = [next_latent]
+    latent_history = torch.cat(
+        [input_latents[:, 1:], next_latent.unsqueeze(1)],
+        dim=1,
+    )
+
+    for horizon in range(1, rollout_steps):
+        action_history = actions[:, horizon:horizon + num_hist]
+        predicted_latents = model(latent_history, action_history)
+        next_latent = predicted_latents[:, -1]
+        rollout_predictions.append(next_latent)
+        latent_history = torch.cat(
+            [latent_history[:, 1:], next_latent.unsqueeze(1)],
+            dim=1,
+        )
+
+    rollout_predictions = torch.stack(rollout_predictions, dim=1)
+    rollout_targets = latent_window[
+        :, num_hist:num_hist + rollout_steps
+    ]
+    rollout_loss = loss_fn(
+        rollout_predictions.float(),
+        rollout_targets,
+    )
+    total_loss = one_step_loss + rollout_loss_weight * rollout_loss
+
+    return total_loss, one_step_loss, rollout_loss
 
 
 def run_epoch(
@@ -277,6 +377,9 @@ def run_epoch(
     optimizer=None,
     log_every=0,
     precision="fp32",
+    rollout_steps=1,
+    rollout_loss_weight=0.0,
+    return_metrics=False,
 ):
     is_training = optimizer is not None
 
@@ -286,8 +389,9 @@ def run_epoch(
         model.eval()
 
     total_loss = torch.zeros((), device=device)
+    total_one_step_loss = torch.zeros((), device=device)
+    total_rollout_loss = torch.zeros((), device=device)
     total_samples = 0
-    loss_fn = torch.nn.MSELoss()
     non_blocking = device.type == "cuda"
     last_log_step = 0
     last_log_time = time.perf_counter()
@@ -301,8 +405,6 @@ def run_epoch(
                 dtype=torch.float32,
                 non_blocking=non_blocking,
             )
-            input_latents = latent_window[:, :-1]
-            target_latents = latent_window[:, 1:]
             actions = batch["actions"].to(
                 device=device,
                 dtype=torch.float32,
@@ -317,19 +419,30 @@ def run_epoch(
                 dtype=torch.bfloat16,
                 enabled=precision == "bf16",
             ):
-                predicted_latents = model(input_latents, actions)
-
-            loss = loss_fn(
-                predicted_latents.float(),
-                target_latents,
-            )
+                num_hist = latent_window.shape[1] - rollout_steps
+                loss, one_step_loss, rollout_loss = compute_world_model_loss(
+                    model=model,
+                    latent_window=latent_window,
+                    actions=actions,
+                    num_hist=num_hist,
+                    rollout_steps=rollout_steps,
+                    rollout_loss_weight=rollout_loss_weight,
+                )
 
             if is_training:
                 loss.backward()
                 optimizer.step()
 
-            batch_size = input_latents.shape[0]
+            batch_size = latent_window.shape[0]
             total_loss.add_(loss.detach(), alpha=batch_size)
+            total_one_step_loss.add_(
+                one_step_loss.detach(),
+                alpha=batch_size,
+            )
+            total_rollout_loss.add_(
+                rollout_loss.detach(),
+                alpha=batch_size,
+            )
             total_samples += batch_size
 
             if is_training and log_every > 0 and step % log_every == 0:
@@ -349,7 +462,15 @@ def run_epoch(
     if total_samples == 0:
         raise ValueError("data loader is empty")
 
-    return total_loss.item() / total_samples
+    average_loss = total_loss.item() / total_samples
+    if not return_metrics:
+        return average_loss
+
+    return {
+        "loss": average_loss,
+        "one_step_loss": total_one_step_loss.item() / total_samples,
+        "rollout_loss": total_rollout_loss.item() / total_samples,
+    }
 
 
 def save_checkpoint(
@@ -395,7 +516,21 @@ def load_training_checkpoint(path, model, optimizer, device):
     return start_epoch, best_val_loss, history, metadata
 
 
-def validate_resume_metadata(saved_metadata, current_metadata):
+def load_model_weights(path, model, device):
+    checkpoint = torch.load(
+        path,
+        map_location=device,
+        weights_only=True,
+    )
+    model.load_state_dict(checkpoint["model"])
+    return checkpoint.get("metadata", {})
+
+
+def validate_checkpoint_metadata(
+    saved_metadata,
+    current_metadata,
+    include_training_objective,
+):
     exact_keys = [
         "model_configuration",
         "train_ids",
@@ -403,11 +538,23 @@ def validate_resume_metadata(saved_metadata, current_metadata):
         "test_ids",
         "normalize_actions",
     ]
+    if include_training_objective:
+        exact_keys.append("training_objective")
 
     for key in exact_keys:
-        if saved_metadata.get(key) != current_metadata.get(key):
+        saved_value = saved_metadata.get(key)
+        current_value = current_metadata.get(key)
+        if key == "training_objective":
+            default_objective = {
+                "rollout_steps": 1,
+                "rollout_loss_weight": 0.0,
+            }
+            saved_value = saved_value or default_objective
+            current_value = current_value or default_objective
+
+        if saved_value != current_value:
             raise ValueError(
-                f"Current {key} does not match the resume checkpoint"
+                f"Current {key} does not match the checkpoint"
             )
 
     for key in ["action_mean", "action_std"]:
@@ -418,15 +565,31 @@ def validate_resume_metadata(saved_metadata, current_metadata):
             continue
         if saved_value is None or current_value is None:
             raise ValueError(
-                f"Current {key} does not match the resume checkpoint"
+                f"Current {key} does not match the checkpoint"
             )
         if not torch.equal(
             saved_value.detach().cpu(),
             current_value.detach().cpu(),
         ):
             raise ValueError(
-                f"Current {key} does not match the resume checkpoint"
+                f"Current {key} does not match the checkpoint"
             )
+
+
+def validate_resume_metadata(saved_metadata, current_metadata):
+    validate_checkpoint_metadata(
+        saved_metadata,
+        current_metadata,
+        include_training_objective=True,
+    )
+
+
+def validate_finetune_metadata(saved_metadata, current_metadata):
+    validate_checkpoint_metadata(
+        saved_metadata,
+        current_metadata,
+        include_training_objective=False,
+    )
 
 
 def train_model(
@@ -444,6 +607,8 @@ def train_model(
     history=None,
     checkpoint_metadata=None,
     precision="fp32",
+    rollout_steps=1,
+    rollout_loss_weight=0.0,
 ):
     if validate_every < 1:
         raise ValueError("validate_every must be at least 1")
@@ -458,17 +623,21 @@ def train_model(
         }
 
     for epoch in range(start_epoch, epochs):
-        train_loss = run_epoch(
+        train_metrics = run_epoch(
             model,
             train_loader,
             device,
             optimizer=optimizer,
             log_every=log_every,
             precision=precision,
+            rollout_steps=rollout_steps,
+            rollout_loss_weight=rollout_loss_weight,
+            return_metrics=True,
         )
+        train_loss = train_metrics["loss"]
         history["train_loss"].append({
             "epoch": epoch,
-            "loss": train_loss,
+            **train_metrics,
         })
 
         should_validate = (
@@ -478,15 +647,19 @@ def train_model(
 
         val_loss = None
         if should_validate:
-            val_loss = run_epoch(
+            val_metrics = run_epoch(
                 model,
                 val_loader,
                 device,
                 precision=precision,
+                rollout_steps=rollout_steps,
+                rollout_loss_weight=rollout_loss_weight,
+                return_metrics=True,
             )
+            val_loss = val_metrics["loss"]
             history["val_loss"].append({
                 "epoch": epoch,
-                "loss": val_loss,
+                **val_metrics,
             })
 
             if val_loss < best_val_loss:
@@ -512,8 +685,18 @@ def train_model(
         )
 
         message = f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.6f}"
+        if rollout_loss_weight > 0.0:
+            message += (
+                f" train_one_step={train_metrics['one_step_loss']:.6f}"
+                f" train_rollout={train_metrics['rollout_loss']:.6f}"
+            )
         if val_loss is not None:
             message += f" val_loss={val_loss:.6f}"
+            if rollout_loss_weight > 0.0:
+                message += (
+                    f" val_one_step={val_metrics['one_step_loss']:.6f}"
+                    f" val_rollout={val_metrics['rollout_loss']:.6f}"
+                )
         print(message)
 
     return history, best_val_loss
@@ -603,6 +786,7 @@ def create_data_loaders(
         "action_mean": action_mean,
         "action_std": action_std,
         "preload_latents": args.preload_latents,
+        "rollout_steps": args.rollout_steps,
     }
 
     train_dataset = WorldModelDataset(
@@ -673,6 +857,14 @@ def validate_arguments(args):
         raise ValueError("num-workers cannot be negative")
     if args.validate_every < 1:
         raise ValueError("validate-every must be at least 1")
+    if args.rollout_steps < 1:
+        raise ValueError("rollout-steps must be at least 1")
+    if args.rollout_loss_weight < 0.0:
+        raise ValueError("rollout-loss-weight cannot be negative")
+    if args.finetune_from is not None and not args.finetune_from.is_file():
+        raise FileNotFoundError(
+            f"Fine-tuning checkpoint not found: {args.finetune_from}"
+        )
 
 
 def main(argv=None):
@@ -726,11 +918,6 @@ def main(argv=None):
     }
 
     model = ViT(**model_configuration).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
 
     checkpoint_metadata = {
         "model_configuration": model_configuration,
@@ -740,7 +927,30 @@ def main(argv=None):
         "normalize_actions": args.normalize_actions,
         "action_mean": action_mean,
         "action_std": action_std,
+        "training_objective": {
+            "rollout_steps": args.rollout_steps,
+            "rollout_loss_weight": args.rollout_loss_weight,
+        },
     }
+
+    if args.finetune_from is not None:
+        saved_metadata = load_model_weights(
+            args.finetune_from,
+            model,
+            device,
+        )
+        validate_finetune_metadata(
+            saved_metadata,
+            checkpoint_metadata,
+        )
+        checkpoint_metadata["finetune_from"] = str(args.finetune_from)
+        print(f"Initialized model weights from: {args.finetune_from}")
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+    )
 
     start_epoch = 0
     best_val_loss = float("inf")
@@ -778,6 +988,10 @@ def main(argv=None):
     print(f"Model compilation: {args.compile}")
     print(f"Preloaded latents: {args.preload_latents}")
     print(
+        f"Training objective: one-step + {args.rollout_loss_weight:g} "
+        f"* K={args.rollout_steps} rollout"
+    )
+    print(
         "Samples: "
         f"train={len(train_loader.dataset)}, "
         f"validation={len(val_loader.dataset)}, "
@@ -799,6 +1013,8 @@ def main(argv=None):
         history=history,
         checkpoint_metadata=checkpoint_metadata,
         precision=precision,
+        rollout_steps=args.rollout_steps,
+        rollout_loss_weight=args.rollout_loss_weight,
     )
 
     best_checkpoint_path = args.output_dir / "best.pt"
@@ -813,16 +1029,22 @@ def main(argv=None):
         weights_only=True,
     )
     model.load_state_dict(best_checkpoint["model"])
-    test_loss = run_epoch(
+    test_metrics = run_epoch(
         model,
         test_loader,
         device,
         precision=precision,
+        rollout_steps=args.rollout_steps,
+        rollout_loss_weight=args.rollout_loss_weight,
+        return_metrics=True,
     )
+    test_loss = test_metrics["loss"]
 
     torch.save(
         {
             "test_loss": test_loss,
+            "test_one_step_loss": test_metrics["one_step_loss"],
+            "test_rollout_loss": test_metrics["rollout_loss"],
             "best_epoch": best_checkpoint["epoch"],
             "best_val_loss": best_val_loss,
         },
@@ -834,6 +1056,11 @@ def main(argv=None):
         f"best_val_loss={best_val_loss:.6f} "
         f"test_loss={test_loss:.6f}"
     )
+    if args.rollout_loss_weight > 0.0:
+        print(
+            f"test_one_step={test_metrics['one_step_loss']:.6f} "
+            f"test_rollout={test_metrics['rollout_loss']:.6f}"
+        )
 
 
 if __name__ == "__main__":

@@ -7,12 +7,23 @@ __pycache__/
 # Checkpoints and datasets
 src/checkpoints/
 data/
-src/datasets/release_dataset/
 src/datasets/something-something-v2/
 src/mylonas_ijepa_wm/raw/
 src/mylonas_ijepa_wm/raw/ijepa_cache
 tests/*
+!tests/test_mylonas_ijepa_position_probe.py
 
 # Generated results
 ijepa_cache/
+src/mylonas_ijepa_wm/position_probe_runs/
 *.npy
+
+
+
+# Generated world-model checkpoints and results
+src/mylonas_ijepa_wm/world_models/
+
+# World-model tests
+!tests/test_mylonas_ijepa_wm_training.py
+!tests/test_mylonas_ijepa_wm_vit.py
+!tests/test_mylonas_ijepa_wm_rollout_eval.py
