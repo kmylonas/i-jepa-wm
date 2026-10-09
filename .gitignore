@@ -29,3 +29,4 @@ src/mylonas_ijepa_wm/world_models/
 !tests/test_mylonas_ijepa_wm_rollout_eval.py
 !tests/test_mylonas_ijepa_wm_rollout_compare.py
 !tests/test_mylonas_ijepa_wm_planning.py
+!tests/test_mylonas_ijepa_wm_pointmaze_planning.py
