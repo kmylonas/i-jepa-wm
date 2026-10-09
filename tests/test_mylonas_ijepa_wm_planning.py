@@ -114,6 +114,32 @@ class CandidateRolloutTest(unittest.TestCase):
                 chunk_size=0,
             )
 
+    def test_chunked_scoring_releases_predictions_between_chunks(self):
+        history = torch.tensor([[[[0.0]], [[1.0]], [[3.0]]]])
+        candidates = torch.tensor([
+            [[3.0], [4.0]],
+            [[5.0], [6.0]],
+            [[7.0], [8.0]],
+        ])
+        cost_batch_sizes = []
+
+        def terminal_value(predictions):
+            cost_batch_sizes.append(predictions.shape[0])
+            return predictions[:, -1, 0, 0]
+
+        costs = planning.score_action_sequences(
+            model=AddLastActionWorldModel(),
+            latent_history=history,
+            action_history=torch.tensor([[1.0], [2.0]]),
+            candidate_actions=candidates,
+            device=torch.device("cpu"),
+            chunk_size=2,
+            cost_fn=terminal_value,
+        )
+
+        torch.testing.assert_close(costs, torch.tensor([10.0, 14.0, 18.0]))
+        self.assertEqual(cost_batch_sizes, [2, 1])
+
 
 class TerminalCostTest(unittest.TestCase):
     def setUp(self):

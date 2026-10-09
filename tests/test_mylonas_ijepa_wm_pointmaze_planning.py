@@ -1,4 +1,7 @@
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -279,6 +282,238 @@ class PlanActionTest(unittest.TestCase):
             mode="latent",
         )
         self.assertAlmostEqual(result.cost, rescored.item(), places=6)
+
+
+class TinyEncoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(1.0))
+        self.saw_grad_enabled = None
+
+    def forward(self, images):
+        self.saw_grad_enabled = torch.is_grad_enabled()
+        if images.shape != (1, 3, 224, 224):
+            raise ValueError("unexpected preprocessed image shape")
+        return torch.ones(1, 4, 2, device=images.device) * self.scale
+
+
+class FrozenEncoderTest(unittest.TestCase):
+    def test_loads_only_encoder_weights_and_freezes_model(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkpoint_path = Path(temporary_directory) / "encoder.pt"
+            torch.save(
+                {
+                    "encoder": {
+                        "module.scale": torch.tensor(3.0),
+                    },
+                    "predictor": {"not_used": torch.tensor(7.0)},
+                    "epoch": 10,
+                },
+                checkpoint_path,
+            )
+
+            encoder = plan_pointmaze.load_frozen_ijepa_encoder(
+                checkpoint_path=checkpoint_path,
+                device=torch.device("cpu"),
+                encoder_factory=lambda **kwargs: TinyEncoder(),
+            )
+
+        self.assertFalse(encoder.training)
+        self.assertEqual(encoder.scale.item(), 3.0)
+        self.assertTrue(
+            all(not parameter.requires_grad for parameter in encoder.parameters())
+        )
+
+    def test_encodes_one_uint8_hwc_frame_without_gradients(self):
+        encoder = TinyEncoder()
+        frame = np.zeros((224, 224, 3), dtype=np.uint8)
+
+        latent = plan_pointmaze.encode_frame(
+            encoder=encoder,
+            frame=frame,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(latent.shape, (4, 2))
+        self.assertEqual(latent.dtype, torch.float32)
+        self.assertFalse(latent.requires_grad)
+        self.assertFalse(encoder.saw_grad_enabled)
+
+
+class FakePlanningPointEnvironment:
+    def __init__(self):
+        self.unwrapped = self
+        self.goal = np.array([2.0, 0.0], dtype=np.float64)
+        self.target_site_id = 0
+        self.point_env = FakePointEnvironment()
+        self.point_env.model = SimpleNamespace(
+            site_rgba=np.ones((1, 4), dtype=np.float64),
+        )
+        self.action_space = SimpleNamespace(
+            low=np.array([-1.0, -1.0], dtype=np.float32),
+            high=np.array([1.0, 1.0], dtype=np.float32),
+        )
+
+    def observation(self):
+        position = self.point_env.data.qpos.astype(np.float32)
+        velocity = self.point_env.data.qvel.astype(np.float32)
+        return {
+            "observation": np.concatenate([position, velocity]),
+            "achieved_goal": position.copy(),
+            "desired_goal": self.goal.astype(np.float32),
+        }
+
+    def reset(self, seed=None):
+        self.point_env.set_state(np.zeros(2), np.zeros(2))
+        return self.observation(), {"success": False}
+
+    def render(self):
+        value = int(np.clip(self.point_env.data.qpos[0] + 2.0, 0, 4) * 50)
+        return np.full((224, 224, 3), value, dtype=np.uint8)
+
+    def step(self, action):
+        qpos = self.point_env.data.qpos.copy()
+        qpos[0] += 0.2
+        self.point_env.set_state(qpos, np.zeros(2))
+        observation = self.observation()
+        success = bool(
+            np.linalg.norm(observation["achieved_goal"] - self.goal) < 0.05
+        )
+        return observation, 0.0, False, False, {"success": success}
+
+
+class CountingEncoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, images):
+        self.calls += 1
+        value = images.mean()
+        return value.expand(1, 1, 1)
+
+
+class PlanningEpisodeTest(unittest.TestCase):
+    def test_replans_from_real_images_until_success(self):
+        environment = FakePlanningPointEnvironment()
+        encoder = CountingEncoder()
+        planner_calls = []
+
+        def fake_planner(**arguments):
+            planner_calls.append(arguments)
+            return planning.CEMResult(
+                action_sequence=torch.zeros(
+                    arguments["planning_horizon"],
+                    10,
+                ),
+                cost=float(len(planner_calls)),
+            )
+
+        result = plan_pointmaze.run_planning_episode(
+            env=environment,
+            encoder=encoder,
+            model=torch.nn.Identity(),
+            device=torch.device("cpu"),
+            seed=9,
+            cost_mode="probe",
+            max_macro_steps=3,
+            planning_horizon=2,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=2,
+            position_probe=torch.nn.Identity(),
+            position_mean=torch.zeros(2),
+            position_std=torch.ones(2),
+            generator=torch.Generator().manual_seed(9),
+            planner_fn=fake_planner,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["seed"], 9)
+        self.assertEqual(result["macro_steps"], 2)
+        self.assertEqual(result["micro_steps"], 10)
+        self.assertEqual(len(result["macro_actions"]), 2)
+        self.assertEqual(len(result["achieved_positions"]), 3)
+        self.assertEqual(len(planner_calls), 2)
+        self.assertEqual(encoder.calls, 4)
+        self.assertEqual(
+            environment.point_env.model.site_rgba[0, 3],
+            0.0,
+        )
+        for arguments in planner_calls:
+            self.assertNotIn("observation", arguments)
+            self.assertNotIn("state", arguments)
+            self.assertIsNone(arguments["oracle_goal"])
+
+
+class PlanningParserTest(unittest.TestCase):
+    def test_uses_colab_configurable_planning_defaults(self):
+        args = plan_pointmaze.parse_args([])
+
+        self.assertEqual(args.cost, "probe")
+        self.assertEqual(args.planning_horizon, 3)
+        self.assertEqual(args.population, 256)
+        self.assertEqual(args.num_elites, 32)
+        self.assertEqual(args.cem_iterations, 5)
+        self.assertEqual(args.candidate_batch_size, 16)
+        self.assertEqual(args.max_macro_steps, 20)
+
+    def test_latent_mode_does_not_require_probe_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            encoder_path = root / "encoder.pt"
+            model_path = root / "world.pt"
+            encoder_path.touch()
+            model_path.touch()
+            args = plan_pointmaze.parse_args([
+                "--cost", "latent",
+                "--encoder-checkpoint", str(encoder_path),
+                "--world-model-checkpoint", str(model_path),
+                "--position-probe-checkpoint", str(root / "missing.pt"),
+            ])
+
+            plan_pointmaze.validate_arguments(args)
+
+    def test_probe_and_oracle_modes_require_probe_checkpoint(self):
+        for mode in ["probe", "oracle"]:
+            with self.subTest(mode=mode):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    encoder_path = root / "encoder.pt"
+                    model_path = root / "world.pt"
+                    encoder_path.touch()
+                    model_path.touch()
+                    args = plan_pointmaze.parse_args([
+                        "--cost", mode,
+                        "--encoder-checkpoint", str(encoder_path),
+                        "--world-model-checkpoint", str(model_path),
+                        "--position-probe-checkpoint",
+                        str(root / "missing.pt"),
+                    ])
+
+                    with self.assertRaisesRegex(
+                        FileNotFoundError,
+                        "probe",
+                    ):
+                        plan_pointmaze.validate_arguments(args)
+
+
+class PlanningSummaryTest(unittest.TestCase):
+    def test_summarizes_success_distance_and_steps(self):
+        records = [
+            {"success": True, "final_goal_distance": 1.0, "macro_steps": 2},
+            {"success": False, "final_goal_distance": 0.5, "macro_steps": 4},
+            {"success": True, "final_goal_distance": 0.25, "macro_steps": 6},
+        ]
+
+        summary = plan_pointmaze.summarize_results(records)
+
+        self.assertEqual(summary["num_episodes"], 3)
+        self.assertAlmostEqual(summary["success_rate"], 2.0 / 3.0)
+        self.assertAlmostEqual(summary["mean_final_goal_distance"], 7.0 / 12.0)
+        self.assertEqual(summary["median_final_goal_distance"], 0.5)
+        self.assertEqual(summary["mean_macro_steps"], 4.0)
 
 if __name__ == "__main__":
     unittest.main()

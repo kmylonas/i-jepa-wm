@@ -22,6 +22,7 @@ src/mylonas_ijepa_wm/position_probe_runs/
 
 # Generated world-model checkpoints and results
 src/mylonas_ijepa_wm/world_models/
+src/mylonas_ijepa_wm/planning_runs/
 
 # World-model tests
 !tests/test_mylonas_ijepa_wm_training.py

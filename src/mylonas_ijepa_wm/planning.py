@@ -131,6 +131,43 @@ def rollout_action_sequences(
     return torch.cat(predictions, dim=0)
 
 
+def score_action_sequences(
+    model,
+    latent_history,
+    action_history,
+    candidate_actions,
+    device,
+    chunk_size,
+    cost_fn,
+    action_mean=None,
+    action_std=None,
+    precision="fp32",
+):
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+
+    costs = []
+    for start in range(0, len(candidate_actions), chunk_size):
+        candidate_chunk = candidate_actions[start:start + chunk_size]
+        predictions = rollout_action_sequences(
+            model=model,
+            latent_history=latent_history,
+            action_history=action_history,
+            candidate_actions=candidate_chunk,
+            device=device,
+            chunk_size=chunk_size,
+            action_mean=action_mean,
+            action_std=action_std,
+            precision=precision,
+        )
+        chunk_costs = cost_fn(predictions)
+        if chunk_costs.shape != (len(candidate_chunk),):
+            raise ValueError("cost_fn must return one cost per candidate")
+        costs.append(chunk_costs)
+
+    return torch.cat(costs, dim=0)
+
+
 def compute_terminal_cost(
     predicted_latents,
     target_latent,
