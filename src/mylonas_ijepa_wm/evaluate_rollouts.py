@@ -340,12 +340,22 @@ def predict_position_trajectory(
             position_mean=position_mean,
             position_std=position_std,
         )[0].cpu()
+        oracle_positions = decode_positions(
+            position_probe=position_probe,
+            latents=latent_sequence[:, num_hist:],
+            position_mean=position_mean,
+            position_std=position_std,
+        )[0].cpu()
 
     start_position = positions[num_hist - 1:num_hist]
     return {
         "episode_id": int(sample["episode_id"]),
         "start": int(sample["start"]),
         "true": positions[num_hist - 1:].cpu(),
+        "oracle": torch.cat(
+            [start_position, oracle_positions],
+            dim=0,
+        ),
         "autoregressive": torch.cat(
             [start_position, autoregressive_positions],
             dim=0,
@@ -722,6 +732,7 @@ def save_trajectory_plot(trajectories, output_path):
 
     for axis, trajectory in zip(axes.flat, trajectories):
         true_positions = trajectory["true"].numpy()
+        oracle_positions = trajectory["oracle"].numpy()
         autoregressive_positions = trajectory["autoregressive"].numpy()
         teacher_forced_positions = trajectory["teacher_forced"].numpy()
 
@@ -746,6 +757,14 @@ def save_trajectory_plot(trajectories, output_path):
             "o-",
             label="True",
             zorder=3,
+        )
+        axis.plot(
+            oracle_positions[:, 0],
+            oracle_positions[:, 1],
+            "d:",
+            label="Real latent decoded (probe floor)",
+            alpha=0.85,
+            zorder=2,
         )
         axis.plot(
             autoregressive_positions[:, 0],
@@ -797,7 +816,7 @@ def save_trajectory_plot(trajectories, output_path):
         handles,
         labels,
         loc="outside upper center",
-        ncol=min(4, len(labels)),
+        ncol=min(5, len(labels)),
     )
 
     output_path = Path(output_path)

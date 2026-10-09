@@ -230,7 +230,7 @@ class RolloutMetricsTest(unittest.TestCase):
 
 
 class RolloutTrajectoryPlotTest(unittest.TestCase):
-    def test_predicts_true_autoregressive_and_teacher_forced_paths(self):
+    def test_predicts_true_oracle_autoregressive_and_teacher_forced_paths(self):
         sample = SequenceDataset()[0]
         sample["episode_id"] = 12
         sample["start"] = 0
@@ -251,6 +251,7 @@ class RolloutTrajectoryPlotTest(unittest.TestCase):
         self.assertEqual(trajectory["episode_id"], 12)
         self.assertEqual(trajectory["start"], 0)
         torch.testing.assert_close(trajectory["true"], expected)
+        torch.testing.assert_close(trajectory["oracle"], expected)
         torch.testing.assert_close(
             trajectory["autoregressive"],
             expected,
@@ -266,6 +267,9 @@ class RolloutTrajectoryPlotTest(unittest.TestCase):
             "start": 0,
             "true": torch.tensor(
                 [[0.0, 0.0], [1.0, 0.0], [2.0, 1.0]]
+            ),
+            "oracle": torch.tensor(
+                [[0.0, 0.0], [1.1, 0.0], [2.1, 1.0]]
             ),
             "autoregressive": torch.tensor(
                 [[0.0, 0.0], [0.8, 0.1], [1.5, 0.8]]
