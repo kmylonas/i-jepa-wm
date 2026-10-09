@@ -1,11 +1,19 @@
 """Planning primitives for the action-conditioned I-JEPA world model."""
 
+from dataclasses import dataclass
+
 import torch
 
 from src.mylonas_ijepa_wm.evaluate_rollouts import (
     autoregressive_rollout,
     decode_positions,
 )
+
+
+@dataclass(frozen=True)
+class CEMResult:
+    action_sequence: torch.Tensor
+    cost: float
 
 
 def assemble_rollout_actions(
@@ -185,4 +193,119 @@ def compute_terminal_cost(
     return torch.linalg.vector_norm(
         predicted_positions - target_position,
         dim=-1,
+    )
+
+
+def _validate_cem_arguments(
+    horizon,
+    action_dim,
+    action_low,
+    action_high,
+    population,
+    num_elites,
+    num_iterations,
+    min_std,
+):
+    for name, value in [
+        ("horizon", horizon),
+        ("action_dim", action_dim),
+        ("population", population),
+        ("num_elites", num_elites),
+        ("num_iterations", num_iterations),
+    ]:
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if num_elites > population:
+        raise ValueError("num_elites cannot exceed population")
+    if min_std <= 0:
+        raise ValueError("min_std must be positive")
+    if (
+        action_low.shape != (action_dim,)
+        or action_high.shape != (action_dim,)
+        or not torch.all(action_low < action_high)
+    ):
+        raise ValueError(
+            "action bounds must have shape [action_dim] with low < high"
+        )
+
+
+def cem_optimize(
+    score_fn,
+    horizon,
+    action_dim,
+    action_low,
+    action_high,
+    population,
+    num_elites,
+    num_iterations,
+    min_std=0.05,
+    generator=None,
+):
+    _validate_cem_arguments(
+        horizon=horizon,
+        action_dim=action_dim,
+        action_low=action_low,
+        action_high=action_high,
+        population=population,
+        num_elites=num_elites,
+        num_iterations=num_iterations,
+        min_std=min_std,
+    )
+
+    action_low = action_low.float()
+    action_high = action_high.to(
+        device=action_low.device,
+        dtype=action_low.dtype,
+    )
+    mean = torch.zeros(
+        horizon,
+        action_dim,
+        device=action_low.device,
+        dtype=action_low.dtype,
+    )
+    standard_deviation = torch.ones_like(mean)
+    best_actions = None
+    best_cost = None
+
+    for _ in range(num_iterations):
+        noise = torch.randn(
+            population,
+            horizon,
+            action_dim,
+            device=mean.device,
+            dtype=mean.dtype,
+            generator=generator,
+        )
+        candidates = mean.unsqueeze(0) + (
+            standard_deviation.unsqueeze(0) * noise
+        )
+        candidates = torch.maximum(
+            torch.minimum(candidates, action_high),
+            action_low,
+        )
+        costs = score_fn(candidates)
+        if costs.shape != (population,):
+            raise ValueError(
+                "score_fn must return one cost per candidate"
+            )
+
+        elite_indices = torch.topk(
+            costs,
+            k=num_elites,
+            largest=False,
+        ).indices
+        elites = candidates[elite_indices]
+        mean = elites.mean(dim=0)
+        standard_deviation = elites.std(
+            dim=0,
+            unbiased=False,
+        ).clamp_min(min_std)
+
+        best_index = costs.argmin()
+        best_actions = candidates[best_index].clone()
+        best_cost = costs[best_index].item()
+
+    return CEMResult(
+        action_sequence=best_actions,
+        cost=best_cost,
     )
