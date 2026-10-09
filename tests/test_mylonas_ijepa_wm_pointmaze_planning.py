@@ -499,6 +499,58 @@ class PlanningParserTest(unittest.TestCase):
                         plan_pointmaze.validate_arguments(args)
 
 
+class CheckpointCompatibilityTest(unittest.TestCase):
+    def setUp(self):
+        self.model_metadata = {
+            "model_configuration": {
+                "num_patches": 256,
+                "num_hist": 3,
+                "ijepa_dim": 1280,
+                "action_dim": 10,
+            },
+        }
+        self.probe_metadata = {
+            "model_configuration": {
+                "ijepa_dim": 1280,
+                "grid_size": 16,
+            },
+        }
+
+    def test_accepts_matching_world_model_and_probe(self):
+        plan_pointmaze.validate_checkpoint_compatibility(
+            model_metadata=self.model_metadata,
+            probe_metadata=self.probe_metadata,
+            cost_mode="probe",
+        )
+
+    def test_rejects_world_model_with_wrong_token_geometry(self):
+        self.model_metadata["model_configuration"]["num_patches"] = 196
+
+        with self.assertRaisesRegex(ValueError, "num_patches"):
+            plan_pointmaze.validate_checkpoint_compatibility(
+                model_metadata=self.model_metadata,
+                probe_metadata=self.probe_metadata,
+                cost_mode="probe",
+            )
+
+    def test_rejects_probe_that_does_not_match_world_model(self):
+        self.probe_metadata["model_configuration"]["ijepa_dim"] = 768
+
+        with self.assertRaisesRegex(ValueError, "probe ijepa_dim"):
+            plan_pointmaze.validate_checkpoint_compatibility(
+                model_metadata=self.model_metadata,
+                probe_metadata=self.probe_metadata,
+                cost_mode="probe",
+            )
+
+    def test_latent_cost_does_not_require_probe_metadata(self):
+        plan_pointmaze.validate_checkpoint_compatibility(
+            model_metadata=self.model_metadata,
+            probe_metadata=None,
+            cost_mode="latent",
+        )
+
+
 class PlanningSummaryTest(unittest.TestCase):
     def test_summarizes_success_distance_and_steps(self):
         records = [

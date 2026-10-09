@@ -26,6 +26,7 @@ from src.mylonas_ijepa_wm.wm import (
 
 IMAGE_SIZE = 224
 PATCH_SIZE = 14
+IJEPA_DIM = 1280
 MODEL_NAME = "vit_huge"
 MODULE_DIR = Path(__file__).resolve().parent
 DEFAULT_ENCODER_CHECKPOINT = (
@@ -153,6 +154,60 @@ def validate_arguments(args):
         raise ValueError("num-elites cannot exceed population")
     if args.min_std <= 0:
         raise ValueError("min-std must be positive")
+
+
+def validate_checkpoint_compatibility(
+    model_metadata,
+    probe_metadata,
+    cost_mode,
+):
+    model_configuration = model_metadata.get("model_configuration")
+    if model_configuration is None:
+        raise ValueError(
+            "world-model checkpoint is missing model_configuration"
+        )
+
+    expected_model_values = {
+        "num_patches": (IMAGE_SIZE // PATCH_SIZE) ** 2,
+        "ijepa_dim": IJEPA_DIM,
+        "action_dim": 10,
+    }
+    for name, expected_value in expected_model_values.items():
+        actual_value = model_configuration.get(name)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"world model {name} must be {expected_value}, "
+                f"got {actual_value}"
+            )
+    if model_configuration.get("num_hist", 0) < 2:
+        raise ValueError("world model num_hist must be at least 2")
+
+    if cost_mode == "latent":
+        return
+    if probe_metadata is None:
+        raise ValueError(
+            f"{cost_mode} cost requires position-probe metadata"
+        )
+
+    probe_configuration = probe_metadata.get("model_configuration")
+    if probe_configuration is None:
+        raise ValueError(
+            "position-probe checkpoint is missing model_configuration"
+        )
+    probe_dim = probe_configuration.get("ijepa_dim")
+    if probe_dim != model_configuration["ijepa_dim"]:
+        raise ValueError(
+            "probe ijepa_dim does not match the world model: "
+            f"{probe_dim} != {model_configuration['ijepa_dim']}"
+        )
+    probe_grid_size = probe_configuration.get("grid_size")
+    if (
+        not isinstance(probe_grid_size, int)
+        or probe_grid_size ** 2 != model_configuration["num_patches"]
+    ):
+        raise ValueError(
+            "probe grid_size does not match the world-model patch count"
+        )
 
 
 def summarize_results(records):
@@ -606,20 +661,13 @@ def main(argv=None):
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
 
-    encoder = load_frozen_ijepa_encoder(
-        checkpoint_path=args.encoder_checkpoint,
-        device=device,
-    )
     model, model_metadata, model_epoch = load_model_and_metadata(
         args.world_model_checkpoint,
         device,
     )
-    model_configuration = model_metadata["model_configuration"]
-    if model_configuration["action_dim"] != 10:
-        raise ValueError("world model action_dim must be 10")
-    model = compile_model(model, enabled=args.compile)
 
     position_probe = None
+    probe_metadata = None
     position_mean = None
     position_std = None
     probe_epoch = None
@@ -632,6 +680,17 @@ def main(argv=None):
         )
         position_mean = probe_metadata["position_mean"]
         position_std = probe_metadata["position_std"]
+
+    validate_checkpoint_compatibility(
+        model_metadata=model_metadata,
+        probe_metadata=probe_metadata,
+        cost_mode=args.cost,
+    )
+    model = compile_model(model, enabled=args.compile)
+    encoder = load_frozen_ijepa_encoder(
+        checkpoint_path=args.encoder_checkpoint,
+        device=device,
+    )
 
     action_mean = None
     action_std = None
