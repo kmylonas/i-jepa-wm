@@ -82,6 +82,18 @@ def parse_args(argv=None):
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument(
+        "--video-dir",
+        type=Path,
+        default=None,
+        help="Optionally save one MP4 recording per episode.",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=int,
+        default=10,
+        help="Playback frame rate for recorded episode videos.",
+    )
+    parser.add_argument(
         "--cost",
         choices=["probe", "latent", "oracle"],
         default="probe",
@@ -154,6 +166,8 @@ def validate_arguments(args):
         raise ValueError("num-elites cannot exceed population")
     if args.min_std <= 0:
         raise ValueError("min-std must be positive")
+    if args.video_fps < 1:
+        raise ValueError("video-fps must be at least 1")
 
 
 def validate_checkpoint_compatibility(
@@ -311,7 +325,7 @@ def render_target_observation(env):
         point_environment.set_state(original_qpos, original_qvel)
 
 
-def execute_macro_action(env, macro_action):
+def execute_macro_action(env, macro_action, frame_callback=None):
     macro_action = torch.as_tensor(macro_action).detach().cpu()
     if macro_action.shape != (10,):
         raise ValueError("macro action must have shape [10]")
@@ -333,6 +347,8 @@ def execute_macro_action(env, macro_action):
             success=success,
             micro_steps=micro_step,
         )
+        if frame_callback is not None:
+            frame_callback(render_visualization_frame(env))
         if success or terminated or truncated:
             break
 
@@ -469,6 +485,20 @@ def hide_goal_marker(env):
     ] = 0.0
 
 
+def render_visualization_frame(env):
+    point_maze = env.unwrapped
+    target_rgba = point_maze.point_env.model.site_rgba[
+        point_maze.target_site_id
+    ]
+    original_rgba = target_rgba.copy()
+
+    try:
+        target_rgba[3] = 1.0
+        return validate_frame(env.render()).copy()
+    finally:
+        target_rgba[:] = original_rgba
+
+
 def _goal_distance(observation):
     return float(
         np.linalg.norm(
@@ -500,6 +530,7 @@ def run_planning_episode(
     min_std=0.05,
     generator=None,
     planner_fn=plan_action,
+    frame_callback=None,
 ):
     observation, reset_info = env.reset(seed=seed)
     hide_goal_marker(env)
@@ -517,6 +548,8 @@ def run_planning_episode(
         device,
         precision,
     )
+    if frame_callback is not None:
+        frame_callback(render_visualization_frame(env))
 
     num_hist = int(model.num_hist) if hasattr(model, "num_hist") else 3
     action_dim = 10
@@ -577,7 +610,11 @@ def run_planning_episode(
             generator=generator,
         )
         macro_action = plan.action_sequence[0].detach().cpu()
-        step_result = execute_macro_action(env, macro_action)
+        step_result = execute_macro_action(
+            env,
+            macro_action,
+            frame_callback=frame_callback,
+        )
         observation = step_result.observation
         macro_actions.append(macro_action.tolist())
         total_micro_steps += step_result.micro_steps
@@ -653,6 +690,56 @@ def _write_json_atomically(payload, output_path):
     temporary_path.replace(output_path)
 
 
+def save_episode_video(
+    frames,
+    video_dir,
+    episode_index,
+    seed,
+    success,
+    fps=10,
+    writer_factory=None,
+):
+    if not frames:
+        raise ValueError("at least one frame is required to save a video")
+    if fps < 1:
+        raise ValueError("fps must be at least 1")
+
+    video_dir = Path(video_dir)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    status = "success" if success else "failed"
+    output_path = video_dir / (
+        f"episode_{episode_index:04d}_seed_{seed:06d}_{status}.mp4"
+    )
+
+    if writer_factory is None:
+        try:
+            import imageio.v2 as imageio
+        except ImportError as error:
+            raise RuntimeError(
+                "Video recording requires imageio and imageio-ffmpeg"
+            ) from error
+        writer_factory = imageio.get_writer
+
+    try:
+        writer = writer_factory(
+            str(output_path),
+            fps=fps,
+            codec="libx264",
+            macro_block_size=None,
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            "Unable to create MP4 writer; install imageio-ffmpeg"
+        ) from error
+    try:
+        for frame in frames:
+            writer.append_data(validate_frame(frame))
+    finally:
+        writer.close()
+
+    return output_path
+
+
 def main(argv=None):
     args = parse_args(argv)
     validate_arguments(args)
@@ -722,6 +809,7 @@ def main(argv=None):
         for episode_index in range(args.num_episodes):
             seed = args.base_seed + episode_index
             generator = _create_generator(device, seed)
+            video_frames = [] if args.video_dir is not None else None
             record = run_planning_episode(
                 env=environment,
                 encoder=encoder,
@@ -743,7 +831,24 @@ def main(argv=None):
                 precision=precision,
                 min_std=args.min_std,
                 generator=generator,
+                frame_callback=(
+                    video_frames.append
+                    if video_frames is not None
+                    else None
+                ),
             )
+            record["video_path"] = None
+            if video_frames is not None:
+                video_path = save_episode_video(
+                    frames=video_frames,
+                    video_dir=args.video_dir,
+                    episode_index=episode_index,
+                    seed=seed,
+                    success=record["success"],
+                    fps=args.video_fps,
+                )
+                record["video_path"] = str(video_path)
+                print(f"Saved video to: {video_path}")
             records.append(record)
             print(
                 f"episode {episode_index + 1}/{args.num_episodes}: "
@@ -778,6 +883,12 @@ def main(argv=None):
             "device": str(device),
             "precision": precision,
             "compile": args.compile,
+            "video_dir": (
+                str(args.video_dir)
+                if args.video_dir is not None
+                else None
+            ),
+            "video_fps": args.video_fps,
         },
         "summary": summary,
         "episodes": records,

@@ -353,6 +353,7 @@ class FakePlanningPointEnvironment:
             low=np.array([-1.0, -1.0], dtype=np.float32),
             high=np.array([1.0, 1.0], dtype=np.float32),
         )
+        self.rendered_target_alphas = []
 
     def observation(self):
         position = self.point_env.data.qpos.astype(np.float32)
@@ -368,6 +369,9 @@ class FakePlanningPointEnvironment:
         return self.observation(), {"success": False}
 
     def render(self):
+        self.rendered_target_alphas.append(
+            float(self.point_env.model.site_rgba[0, 3])
+        )
         value = int(np.clip(self.point_env.data.qpos[0] + 2.0, 0, 4) * 50)
         return np.full((224, 224, 3), value, dtype=np.uint8)
 
@@ -446,6 +450,137 @@ class PlanningEpisodeTest(unittest.TestCase):
             self.assertNotIn("state", arguments)
             self.assertIsNone(arguments["oracle_goal"])
 
+    def test_records_initial_frame_and_every_raw_action(self):
+        environment = FakePlanningPointEnvironment()
+        encoder = CountingEncoder()
+        recorded_frames = []
+
+        def fake_planner(**arguments):
+            return planning.CEMResult(
+                action_sequence=torch.zeros(
+                    arguments["planning_horizon"],
+                    10,
+                ),
+                cost=1.0,
+            )
+
+        result = plan_pointmaze.run_planning_episode(
+            env=environment,
+            encoder=encoder,
+            model=torch.nn.Identity(),
+            device=torch.device("cpu"),
+            seed=3,
+            cost_mode="probe",
+            max_macro_steps=1,
+            planning_horizon=1,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=2,
+            position_probe=torch.nn.Identity(),
+            position_mean=torch.zeros(2),
+            position_std=torch.ones(2),
+            frame_callback=recorded_frames.append,
+            planner_fn=fake_planner,
+        )
+
+        self.assertEqual(result["micro_steps"], 5)
+        self.assertEqual(len(recorded_frames), 6)
+        self.assertTrue(
+            all(frame.shape == (224, 224, 3) for frame in recorded_frames)
+        )
+        self.assertEqual(
+            environment.rendered_target_alphas.count(1.0),
+            6,
+        )
+        self.assertEqual(
+            environment.point_env.model.site_rgba[0, 3],
+            0.0,
+        )
+
+
+class VideoRecordingTest(unittest.TestCase):
+    def test_visualization_frame_temporarily_reveals_target(self):
+        environment = FakePlanningPointEnvironment()
+        environment.point_env.model.site_rgba[0, 3] = 0.0
+
+        frame = plan_pointmaze.render_visualization_frame(environment)
+
+        self.assertEqual(frame.shape, (224, 224, 3))
+        self.assertEqual(environment.rendered_target_alphas[-1], 1.0)
+        self.assertEqual(
+            environment.point_env.model.site_rgba[0, 3],
+            0.0,
+        )
+
+    def test_saves_all_frames_to_status_named_video(self):
+        class FakeWriter:
+            def __init__(self):
+                self.frames = []
+                self.closed = False
+
+            def append_data(self, frame):
+                self.frames.append(frame.copy())
+
+            def close(self):
+                self.closed = True
+
+        writer = FakeWriter()
+        writer_arguments = {}
+
+        def writer_factory(path, **kwargs):
+            writer_arguments["path"] = path
+            writer_arguments.update(kwargs)
+            return writer
+
+        frames = [
+            np.zeros((224, 224, 3), dtype=np.uint8),
+            np.full((224, 224, 3), 17, dtype=np.uint8),
+        ]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = plan_pointmaze.save_episode_video(
+                frames=frames,
+                video_dir=Path(temporary_directory) / "videos",
+                episode_index=7,
+                seed=12,
+                success=False,
+                fps=10,
+                writer_factory=writer_factory,
+            )
+
+            self.assertEqual(
+                output_path.name,
+                "episode_0007_seed_000012_failed.mp4",
+            )
+            self.assertTrue(output_path.parent.is_dir())
+
+        self.assertEqual(writer_arguments["path"], str(output_path))
+        self.assertEqual(writer_arguments["fps"], 10)
+        self.assertEqual(len(writer.frames), 2)
+        np.testing.assert_array_equal(writer.frames[1], frames[1])
+        self.assertTrue(writer.closed)
+
+    def test_reports_missing_ffmpeg_backend(self):
+        def unavailable_writer(*args, **kwargs):
+            raise ValueError("Could not find a video backend")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "imageio-ffmpeg",
+            ):
+                plan_pointmaze.save_episode_video(
+                    frames=[
+                        np.zeros((224, 224, 3), dtype=np.uint8),
+                    ],
+                    video_dir=temporary_directory,
+                    episode_index=0,
+                    seed=0,
+                    success=True,
+                    writer_factory=unavailable_writer,
+                )
+
 
 class PlanningParserTest(unittest.TestCase):
     def test_uses_colab_configurable_planning_defaults(self):
@@ -458,6 +593,8 @@ class PlanningParserTest(unittest.TestCase):
         self.assertEqual(args.cem_iterations, 5)
         self.assertEqual(args.candidate_batch_size, 16)
         self.assertEqual(args.max_macro_steps, 20)
+        self.assertIsNone(args.video_dir)
+        self.assertEqual(args.video_fps, 10)
 
     def test_latent_mode_does_not_require_probe_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
