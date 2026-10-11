@@ -240,6 +240,21 @@ class FirstActionWorldModel(torch.nn.Module):
         return predictions
 
 
+class XYActionWorldModel(torch.nn.Module):
+    def forward(self, latent_history, actions):
+        predictions = latent_history.clone()
+        predictions[:, -1] = (
+            latent_history[:, -1]
+            + actions[:, -1, :2].unsqueeze(1)
+        )
+        return predictions
+
+
+class FirstTokenPositionProbe(torch.nn.Module):
+    def forward(self, tokens):
+        return tokens[:, 0, :2]
+
+
 class PlanActionTest(unittest.TestCase):
     def test_optimizes_and_returns_complete_bounded_macro_sequence(self):
         latent_history = torch.zeros(3, 1, 1)
@@ -282,6 +297,29 @@ class PlanActionTest(unittest.TestCase):
             mode="latent",
         )
         self.assertAlmostEqual(result.cost, rescored.item(), places=6)
+
+    def test_decodes_selected_plan_autoregressively(self):
+        selected_actions = torch.zeros(2, 10)
+        selected_actions[0, 0] = 1.0
+        selected_actions[1, 1] = 2.0
+
+        predicted_positions = (
+            plan_pointmaze.predict_selected_plan_positions(
+                model=XYActionWorldModel(),
+                latent_history=torch.zeros(3, 1, 2),
+                action_history=torch.zeros(2, 10),
+                selected_actions=selected_actions,
+                device=torch.device("cpu"),
+                position_probe=FirstTokenPositionProbe(),
+                position_mean=torch.zeros(2),
+                position_std=torch.ones(2),
+            )
+        )
+
+        torch.testing.assert_close(
+            predicted_positions,
+            torch.tensor([[1.0, 0.0], [1.0, 2.0]]),
+        )
 
 
 class TinyEncoder(torch.nn.Module):
@@ -394,7 +432,7 @@ class CountingEncoder(torch.nn.Module):
     def forward(self, images):
         self.calls += 1
         value = images.mean()
-        return value.expand(1, 1, 1)
+        return value.expand(1, 1, 2)
 
 
 class PlanningEpisodeTest(unittest.TestCase):
@@ -450,6 +488,8 @@ class PlanningEpisodeTest(unittest.TestCase):
             self.assertNotIn("state", arguments)
             self.assertIsNone(arguments["oracle_goal"])
 
+        self.assertIsNone(result["last_plan_diagnostic"])
+
     def test_records_initial_frame_and_every_raw_action(self):
         environment = FakePlanningPointEnvironment()
         encoder = CountingEncoder()
@@ -496,6 +536,57 @@ class PlanningEpisodeTest(unittest.TestCase):
         self.assertEqual(
             environment.point_env.model.site_rgba[0, 3],
             0.0,
+        )
+
+    def test_keeps_last_selected_plan_when_step_limit_is_exhausted(self):
+        environment = FakePlanningPointEnvironment()
+
+        def fake_planner(**arguments):
+            actions = torch.zeros(arguments["planning_horizon"], 10)
+            actions[:, 0] = 0.5
+            return planning.CEMResult(
+                action_sequence=actions,
+                cost=0.25,
+            )
+
+        result = plan_pointmaze.run_planning_episode(
+            env=environment,
+            encoder=CountingEncoder(),
+            model=XYActionWorldModel(),
+            device=torch.device("cpu"),
+            seed=5,
+            cost_mode="probe",
+            max_macro_steps=1,
+            planning_horizon=2,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=2,
+            position_probe=FirstTokenPositionProbe(),
+            position_mean=torch.zeros(2),
+            position_std=torch.ones(2),
+            collect_failure_diagnostic=True,
+            planner_fn=fake_planner,
+        )
+
+        self.assertTrue(result["failed_by_step_limit"])
+        diagnostic = result["last_plan_diagnostic"]
+        self.assertIsNotNone(diagnostic)
+        np.testing.assert_allclose(
+            diagnostic["actual_position_before"],
+            [0.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            diagnostic["actual_position_after_first_macro"],
+            [1.0, 0.0],
+        )
+        self.assertEqual(
+            np.asarray(diagnostic["selected_actions"]).shape,
+            (2, 10),
+        )
+        self.assertEqual(
+            np.asarray(diagnostic["predicted_positions"]).shape,
+            (2, 2),
         )
 
 
@@ -582,6 +673,52 @@ class VideoRecordingTest(unittest.TestCase):
                 )
 
 
+class FailureDiagnosticOutputTest(unittest.TestCase):
+    def test_saves_last_plan_arrays_and_top_down_figure(self):
+        diagnostic = {
+            "actual_position_before": [-1.0, -1.0],
+            "decoded_current_position": [-0.9, -1.0],
+            "actual_position_after_first_macro": [-0.5, -1.0],
+            "actual_goal_position": [-1.0, 1.0],
+            "decoded_target_position": [-0.9, 0.9],
+            "selected_actions": np.zeros((2, 10), dtype=np.float32).tolist(),
+            "predicted_positions": [[-0.5, -0.2], [-0.8, 0.8]],
+            "planner_cost": 0.1,
+        }
+        wall_rectangles = np.array(
+            [[-1.5, -0.1, 2.0, 0.2]],
+            dtype=np.float32,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = plan_pointmaze.save_failure_diagnostic(
+                diagnostic=diagnostic,
+                achieved_positions=[[-1.0, -1.0], [-0.5, -1.0]],
+                wall_rectangles=wall_rectangles,
+                output_dir=temporary_directory,
+                episode_index=3,
+                seed=8,
+            )
+
+            figure_path = Path(paths["figure_path"])
+            data_path = Path(paths["data_path"])
+            self.assertEqual(
+                figure_path.name,
+                "episode_0003_seed_000008_last_plan.png",
+            )
+            self.assertTrue(figure_path.is_file())
+            self.assertTrue(data_path.is_file())
+            with np.load(data_path) as saved:
+                np.testing.assert_allclose(
+                    saved["predicted_positions"],
+                    diagnostic["predicted_positions"],
+                )
+                np.testing.assert_allclose(
+                    saved["actual_position_after_first_macro"],
+                    [-0.5, -1.0],
+                )
+
+
 class PlanningParserTest(unittest.TestCase):
     def test_uses_colab_configurable_planning_defaults(self):
         args = plan_pointmaze.parse_args([])
@@ -595,6 +732,7 @@ class PlanningParserTest(unittest.TestCase):
         self.assertEqual(args.max_macro_steps, 20)
         self.assertIsNone(args.video_dir)
         self.assertEqual(args.video_fps, 10)
+        self.assertIsNone(args.failure_diagnostics_dir)
 
     def test_latent_mode_does_not_require_probe_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

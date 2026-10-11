@@ -10,10 +10,14 @@ import torch
 import src.models.vision_transformer as vit
 
 from src.mylonas_ijepa_wm.embed_frames import preprocess_frames
-from src.mylonas_ijepa_wm.evaluate_rollouts import load_model_and_metadata
+from src.mylonas_ijepa_wm.evaluate_rollouts import (
+    decode_positions,
+    load_model_and_metadata,
+)
 from src.mylonas_ijepa_wm.planning import (
     cem_optimize,
     compute_terminal_cost,
+    rollout_action_sequences,
     score_action_sequences,
 )
 from src.mylonas_ijepa_wm.position_probe import load_probe_checkpoint
@@ -94,6 +98,15 @@ def parse_args(argv=None):
         help="Playback frame rate for recorded episode videos.",
     )
     parser.add_argument(
+        "--failure-diagnostics-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optionally save the final selected-plan diagnostic for "
+            "episodes that exhaust the macro-step budget."
+        ),
+    )
+    parser.add_argument(
         "--cost",
         choices=["probe", "latent", "oracle"],
         default="probe",
@@ -168,6 +181,13 @@ def validate_arguments(args):
         raise ValueError("min-std must be positive")
     if args.video_fps < 1:
         raise ValueError("video-fps must be at least 1")
+    if (
+        args.failure_diagnostics_dir is not None
+        and args.cost == "latent"
+    ):
+        raise ValueError(
+            "failure diagnostics require probe or oracle cost"
+        )
 
 
 def validate_checkpoint_compatibility(
@@ -477,6 +497,57 @@ def plan_action(
     )
 
 
+def predict_selected_plan_positions(
+    model,
+    latent_history,
+    action_history,
+    selected_actions,
+    device,
+    position_probe,
+    position_mean,
+    position_std,
+    action_mean=None,
+    action_std=None,
+    precision="fp32",
+):
+    if selected_actions.ndim != 2:
+        raise ValueError(
+            "selected_actions must have shape [horizon, action_dim]"
+        )
+
+    predicted_latents = rollout_action_sequences(
+        model=model,
+        latent_history=latent_history.unsqueeze(0),
+        action_history=action_history,
+        candidate_actions=selected_actions.unsqueeze(0),
+        device=device,
+        chunk_size=1,
+        action_mean=action_mean,
+        action_std=action_std,
+        precision=precision,
+    )[0]
+    return decode_positions(
+        position_probe=position_probe,
+        latents=predicted_latents,
+        position_mean=position_mean,
+        position_std=position_std,
+    ).detach().cpu()
+
+
+def _decode_one_position(
+    position_probe,
+    latent,
+    position_mean,
+    position_std,
+):
+    return decode_positions(
+        position_probe=position_probe,
+        latents=latent,
+        position_mean=position_mean,
+        position_std=position_std,
+    ).detach().cpu().tolist()
+
+
 def hide_goal_marker(env):
     point_maze = env.unwrapped
     point_maze.point_env.model.site_rgba[
@@ -531,7 +602,17 @@ def run_planning_episode(
     generator=None,
     planner_fn=plan_action,
     frame_callback=None,
+    collect_failure_diagnostic=False,
 ):
+    if collect_failure_diagnostic and (
+        position_probe is None
+        or position_mean is None
+        or position_std is None
+    ):
+        raise ValueError(
+            "failure diagnostics require a position probe and statistics"
+        )
+
     observation, reset_info = env.reset(seed=seed)
     hide_goal_marker(env)
     initial_frame = validate_frame(env.render())
@@ -581,8 +662,9 @@ def run_planning_episode(
     terminated = False
     truncated = False
     final_planner_cost = None
+    last_plan_diagnostic = None
 
-    for _ in range(max_macro_steps):
+    for macro_step_index in range(max_macro_steps):
         if success or terminated or truncated:
             break
         plan = planner_fn(
@@ -609,6 +691,51 @@ def run_planning_episode(
             min_std=min_std,
             generator=generator,
         )
+        if (
+            collect_failure_diagnostic
+            and macro_step_index == max_macro_steps - 1
+        ):
+            predicted_positions = predict_selected_plan_positions(
+                model=model,
+                latent_history=latent_history,
+                action_history=action_history,
+                selected_actions=plan.action_sequence,
+                device=device,
+                position_probe=position_probe,
+                position_mean=position_mean,
+                position_std=position_std,
+                action_mean=action_mean,
+                action_std=action_std,
+                precision=precision,
+            )
+            last_plan_diagnostic = {
+                "actual_position_before": np.asarray(
+                    observation["achieved_goal"],
+                    dtype=np.float32,
+                ).tolist(),
+                "decoded_current_position": _decode_one_position(
+                    position_probe,
+                    latent_history[-1],
+                    position_mean,
+                    position_std,
+                ),
+                "actual_goal_position": np.asarray(
+                    observation["desired_goal"],
+                    dtype=np.float32,
+                ).tolist(),
+                "decoded_target_position": _decode_one_position(
+                    position_probe,
+                    target_latent,
+                    position_mean,
+                    position_std,
+                ),
+                "selected_actions": (
+                    plan.action_sequence.detach().cpu().tolist()
+                ),
+                "predicted_positions": predicted_positions.tolist(),
+                "planner_cost": float(plan.cost),
+                "actual_position_after_first_macro": None,
+            }
         macro_action = plan.action_sequence[0].detach().cpu()
         step_result = execute_macro_action(
             env,
@@ -624,6 +751,13 @@ def run_planning_episode(
                 dtype=np.float32,
             ).tolist()
         )
+        if last_plan_diagnostic is not None:
+            last_plan_diagnostic[
+                "actual_position_after_first_macro"
+            ] = np.asarray(
+                observation["achieved_goal"],
+                dtype=np.float32,
+            ).tolist()
         final_planner_cost = plan.cost
 
         next_latent = encode_frame(
@@ -642,6 +776,12 @@ def run_planning_episode(
         terminated = step_result.terminated
         truncated = step_result.truncated
 
+    failed_by_step_limit = (
+        not success and len(macro_actions) == max_macro_steps
+    )
+    if not failed_by_step_limit:
+        last_plan_diagnostic = None
+
     return {
         "seed": seed,
         "cost_mode": cost_mode,
@@ -653,6 +793,8 @@ def run_planning_episode(
         "initial_goal_distance": initial_distance,
         "final_goal_distance": _goal_distance(observation),
         "final_planner_cost": final_planner_cost,
+        "failed_by_step_limit": failed_by_step_limit,
+        "last_plan_diagnostic": last_plan_diagnostic,
         "macro_actions": macro_actions,
         "achieved_positions": achieved_positions,
     }
@@ -740,6 +882,204 @@ def save_episode_video(
     return output_path
 
 
+def extract_wall_rectangles(env):
+    model = env.unwrapped.point_env.model
+    wall_rectangles = []
+
+    for geometry_index in range(model.ngeom):
+        geometry_name = model.geom(geometry_index).name
+        if not geometry_name.startswith("block_"):
+            continue
+        center_x, center_y = model.geom_pos[geometry_index, :2]
+        half_width, half_height = model.geom_size[
+            geometry_index,
+            :2,
+        ]
+        wall_rectangles.append([
+            center_x - half_width,
+            center_y - half_height,
+            2.0 * half_width,
+            2.0 * half_height,
+        ])
+
+    return np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+
+
+def save_failure_diagnostic(
+    diagnostic,
+    achieved_positions,
+    wall_rectangles,
+    output_dir,
+    episode_index,
+    seed,
+):
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"episode_{episode_index:04d}_seed_{seed:06d}_last_plan"
+    figure_path = output_dir / f"{stem}.png"
+    data_path = output_dir / f"{stem}.npz"
+
+    selected_actions = np.asarray(
+        diagnostic["selected_actions"],
+        dtype=np.float32,
+    )
+    predicted_positions = np.asarray(
+        diagnostic["predicted_positions"],
+        dtype=np.float32,
+    )
+    actual_position_before = np.asarray(
+        diagnostic["actual_position_before"],
+        dtype=np.float32,
+    )
+    decoded_current_position = np.asarray(
+        diagnostic["decoded_current_position"],
+        dtype=np.float32,
+    )
+    actual_position_after = np.asarray(
+        diagnostic["actual_position_after_first_macro"],
+        dtype=np.float32,
+    )
+    actual_goal_position = np.asarray(
+        diagnostic["actual_goal_position"],
+        dtype=np.float32,
+    )
+    decoded_target_position = np.asarray(
+        diagnostic["decoded_target_position"],
+        dtype=np.float32,
+    )
+    achieved_positions = np.asarray(achieved_positions, dtype=np.float32)
+    wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32)
+
+    np.savez_compressed(
+        data_path,
+        selected_actions=selected_actions,
+        predicted_positions=predicted_positions,
+        actual_position_before=actual_position_before,
+        decoded_current_position=decoded_current_position,
+        actual_position_after_first_macro=actual_position_after,
+        actual_goal_position=actual_goal_position,
+        decoded_target_position=decoded_target_position,
+        achieved_positions=achieved_positions,
+        wall_rectangles=wall_rectangles,
+        planner_cost=np.asarray(
+            diagnostic["planner_cost"],
+            dtype=np.float32,
+        ),
+    )
+
+    figure, axis = plt.subplots(figsize=(9, 7))
+    for wall_index, (x, y, width, height) in enumerate(wall_rectangles):
+        axis.add_patch(Rectangle(
+            (x, y),
+            width,
+            height,
+            facecolor="#b98247",
+            edgecolor="#5f3d1f",
+            linewidth=1.0,
+            label="wall" if wall_index == 0 else None,
+        ))
+
+    axis.plot(
+        achieved_positions[:, 0],
+        achieved_positions[:, 1],
+        color="#2ca25f",
+        marker="o",
+        markersize=3,
+        linewidth=1.5,
+        label="actual macro trajectory",
+    )
+    predicted_path = np.concatenate(
+        [decoded_current_position[None], predicted_positions],
+        axis=0,
+    )
+    axis.plot(
+        predicted_path[:, 0],
+        predicted_path[:, 1],
+        color="#6a3d9a",
+        marker="o",
+        linestyle="--",
+        linewidth=2.0,
+        label="WM selected-plan prediction",
+    )
+    for horizon_index, position in enumerate(predicted_positions, start=1):
+        vertical_offset = 5 + 8 * ((horizon_index - 1) % 3)
+        axis.annotate(
+            f"P{horizon_index}",
+            xy=position,
+            xytext=(5, vertical_offset),
+            textcoords="offset points",
+            fontsize=8,
+        )
+
+    axis.scatter(
+        *actual_position_before,
+        color="#006d2c",
+        s=70,
+        zorder=5,
+        label="actual before final plan",
+    )
+    axis.scatter(
+        *actual_position_after,
+        color="#00bcd4",
+        marker="X",
+        s=90,
+        zorder=5,
+        label="actual after first macro",
+    )
+    axis.scatter(
+        *actual_goal_position,
+        color="red",
+        marker="*",
+        s=160,
+        zorder=5,
+        label="actual goal",
+    )
+    axis.scatter(
+        *decoded_target_position,
+        color="#ff69b4",
+        marker="x",
+        s=80,
+        zorder=5,
+        label="probe-decoded target",
+    )
+    axis.scatter(
+        *decoded_current_position,
+        color="#6a3d9a",
+        marker="s",
+        s=55,
+        zorder=5,
+        label="probe-decoded current",
+    )
+
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlabel("x")
+    axis.set_ylabel("y")
+    axis.set_title(
+        f"Episode {episode_index}, seed {seed}: last selected CEM plan\n"
+        "Dashed lines connect predicted macro endpoints"
+    )
+    axis.grid(alpha=0.2)
+    axis.autoscale_view()
+    axis.margins(0.08)
+    axis.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        fontsize=8,
+    )
+    figure.tight_layout()
+    figure.savefig(figure_path, dpi=160)
+    plt.close(figure)
+
+    return {
+        "figure_path": str(figure_path),
+        "data_path": str(data_path),
+    }
+
+
 def main(argv=None):
     args = parse_args(argv)
     validate_arguments(args)
@@ -804,6 +1144,9 @@ def main(argv=None):
         environment_id=args.environment_id,
         max_micro_steps=args.max_macro_steps * 5,
     )
+    wall_rectangles = None
+    if args.failure_diagnostics_dir is not None:
+        wall_rectangles = extract_wall_rectangles(environment)
     records = []
     try:
         for episode_index in range(args.num_episodes):
@@ -836,6 +1179,9 @@ def main(argv=None):
                     if video_frames is not None
                     else None
                 ),
+                collect_failure_diagnostic=(
+                    args.failure_diagnostics_dir is not None
+                ),
             )
             record["video_path"] = None
             if video_frames is not None:
@@ -849,6 +1195,21 @@ def main(argv=None):
                 )
                 record["video_path"] = str(video_path)
                 print(f"Saved video to: {video_path}")
+            record["failure_diagnostic_paths"] = None
+            if record["last_plan_diagnostic"] is not None:
+                diagnostic_paths = save_failure_diagnostic(
+                    diagnostic=record["last_plan_diagnostic"],
+                    achieved_positions=record["achieved_positions"],
+                    wall_rectangles=wall_rectangles,
+                    output_dir=args.failure_diagnostics_dir,
+                    episode_index=episode_index,
+                    seed=seed,
+                )
+                record["failure_diagnostic_paths"] = diagnostic_paths
+                print(
+                    "Saved failure diagnostic to: "
+                    f"{diagnostic_paths['figure_path']}"
+                )
             records.append(record)
             print(
                 f"episode {episode_index + 1}/{args.num_episodes}: "
@@ -889,6 +1250,11 @@ def main(argv=None):
                 else None
             ),
             "video_fps": args.video_fps,
+            "failure_diagnostics_dir": (
+                str(args.failure_diagnostics_dir)
+                if args.failure_diagnostics_dir is not None
+                else None
+            ),
         },
         "summary": summary,
         "episodes": records,
