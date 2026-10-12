@@ -828,7 +828,7 @@ def create_environment(environment_id, max_micro_steps):
     import gymnasium_robotics
 
     gym.register_envs(gymnasium_robotics)
-    return gym.make(
+    environment = gym.make(
         environment_id,
         render_mode="rgb_array",
         width=IMAGE_SIZE,
@@ -837,6 +837,16 @@ def create_environment(environment_id, max_micro_steps):
         reset_target=True,
         max_episode_steps=max_micro_steps,
     )
+    camera_config = {
+        "distance": 7.0,
+        "azimuth": 90.0,
+        "elevation": -90.0,
+        "lookat": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+    }
+    environment.unwrapped.point_env.mujoco_renderer.default_cam_config.update(
+        camera_config
+    )
+    return environment
 
 
 def _create_generator(device, seed):

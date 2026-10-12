@@ -10,6 +10,39 @@ from src.mylonas_ijepa_wm import plan_pointmaze
 from src.mylonas_ijepa_wm import planning
 
 
+def count_green_ball_pixels(frame):
+    red = frame[..., 0].astype(np.int16)
+    green = frame[..., 1].astype(np.int16)
+    blue = frame[..., 2].astype(np.int16)
+    green_ball = (
+        (green > red + 15)
+        & (green > blue + 15)
+        & (green > 60)
+    )
+    return int(green_ball.sum())
+
+
+class TopDownPlanningCameraTest(unittest.TestCase):
+    def test_ball_remains_visible_above_middle_wall(self):
+        environment = plan_pointmaze.create_environment(
+            environment_id="PointMaze_UMaze-v3",
+            max_micro_steps=100,
+        )
+        try:
+            environment.reset(seed=0)
+            plan_pointmaze.hide_goal_marker(environment)
+            environment.unwrapped.point_env.set_state(
+                np.array([1.0 / 3.0, 2.0 / 3.0]),
+                np.zeros(2),
+            )
+
+            frame = environment.render()
+
+            self.assertGreater(count_green_ball_pixels(frame), 50)
+        finally:
+            environment.close()
+
+
 class FakeData:
     def __init__(self):
         self.qpos = np.array([0.2, 0.3], dtype=np.float64)
