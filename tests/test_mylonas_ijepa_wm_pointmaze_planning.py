@@ -588,6 +588,17 @@ class PlanningEpisodeTest(unittest.TestCase):
             np.asarray(diagnostic["predicted_positions"]).shape,
             (2, 2),
         )
+        decoded_trajectory = np.asarray(
+            diagnostic["decoded_achieved_positions"]
+        )
+        self.assertEqual(decoded_trajectory.shape, (2, 2))
+        np.testing.assert_allclose(
+            decoded_trajectory[0],
+            diagnostic["decoded_current_position"],
+        )
+        self.assertFalse(
+            np.allclose(decoded_trajectory[0], decoded_trajectory[1])
+        )
 
 
 class VideoRecordingTest(unittest.TestCase):
@@ -681,6 +692,10 @@ class FailureDiagnosticOutputTest(unittest.TestCase):
             "actual_position_after_first_macro": [-0.5, -1.0],
             "actual_goal_position": [-1.0, 1.0],
             "decoded_target_position": [-0.9, 0.9],
+            "decoded_achieved_positions": [
+                [-0.9, -1.0],
+                [-0.4, -0.9],
+            ],
             "selected_actions": np.zeros((2, 10), dtype=np.float32).tolist(),
             "predicted_positions": [[-0.5, -0.2], [-0.8, 0.8]],
             "planner_cost": 0.1,
@@ -716,6 +731,10 @@ class FailureDiagnosticOutputTest(unittest.TestCase):
                 np.testing.assert_allclose(
                     saved["actual_position_after_first_macro"],
                     [-0.5, -1.0],
+                )
+                np.testing.assert_allclose(
+                    saved["decoded_achieved_positions"],
+                    diagnostic["decoded_achieved_positions"],
                 )
 
 

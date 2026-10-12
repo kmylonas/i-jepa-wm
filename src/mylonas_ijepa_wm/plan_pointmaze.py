@@ -656,6 +656,16 @@ def run_planning_episode(
     achieved_positions = [
         np.asarray(observation["achieved_goal"], dtype=np.float32).tolist()
     ]
+    decoded_achieved_positions = None
+    if collect_failure_diagnostic:
+        decoded_achieved_positions = [
+            _decode_one_position(
+                position_probe,
+                initial_latent,
+                position_mean,
+                position_std,
+            )
+        ]
     macro_actions = []
     total_micro_steps = 0
     success = bool(reset_info.get("success", False))
@@ -766,6 +776,15 @@ def run_planning_episode(
             device,
             precision,
         )
+        if decoded_achieved_positions is not None:
+            decoded_achieved_positions.append(
+                _decode_one_position(
+                    position_probe,
+                    next_latent,
+                    position_mean,
+                    position_std,
+                )
+            )
         latent_history, action_history = update_mpc_history(
             latent_history=latent_history,
             action_history=action_history,
@@ -781,6 +800,10 @@ def run_planning_episode(
     )
     if not failed_by_step_limit:
         last_plan_diagnostic = None
+    elif last_plan_diagnostic is not None:
+        last_plan_diagnostic["decoded_achieved_positions"] = (
+            decoded_achieved_positions
+        )
 
     return {
         "seed": seed,
@@ -950,6 +973,10 @@ def save_failure_diagnostic(
         diagnostic["decoded_target_position"],
         dtype=np.float32,
     )
+    decoded_achieved_positions = np.asarray(
+        diagnostic["decoded_achieved_positions"],
+        dtype=np.float32,
+    )
     achieved_positions = np.asarray(achieved_positions, dtype=np.float32)
     wall_rectangles = np.asarray(wall_rectangles, dtype=np.float32)
 
@@ -962,6 +989,7 @@ def save_failure_diagnostic(
         actual_position_after_first_macro=actual_position_after,
         actual_goal_position=actual_goal_position,
         decoded_target_position=decoded_target_position,
+        decoded_achieved_positions=decoded_achieved_positions,
         achieved_positions=achieved_positions,
         wall_rectangles=wall_rectangles,
         planner_cost=np.asarray(
@@ -990,6 +1018,16 @@ def save_failure_diagnostic(
         markersize=3,
         linewidth=1.5,
         label="actual macro trajectory",
+    )
+    axis.plot(
+        decoded_achieved_positions[:, 0],
+        decoded_achieved_positions[:, 1],
+        color="#e66101",
+        marker="x",
+        markersize=4,
+        linestyle="--",
+        linewidth=1.5,
+        label="probe-decoded actual trajectory",
     )
     predicted_path = np.concatenate(
         [decoded_current_position[None], predicted_positions],
@@ -1059,7 +1097,7 @@ def save_failure_diagnostic(
     axis.set_ylabel("y")
     axis.set_title(
         f"Episode {episode_index}, seed {seed}: last selected CEM plan\n"
-        "Dashed lines connect predicted macro endpoints"
+        "Purple dashed line connects predicted macro endpoints"
     )
     axis.grid(alpha=0.2)
     axis.autoscale_view()
