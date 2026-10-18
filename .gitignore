@@ -32,4 +32,6 @@ src/mylonas_ijepa_wm/debug
 !tests/test_mylonas_ijepa_wm_rollout_compare.py
 !tests/test_mylonas_ijepa_wm_planning.py
 !tests/test_mylonas_ijepa_wm_pointmaze_planning.py
+!tests/test_mylonas_ijepa_wm_proprio.py
+!tests/test_mylonas_ijepa_wm_proprio_planning.py
 !tests/test_mylonas_ijepa_embedding_similarity.py

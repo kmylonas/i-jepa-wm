@@ -21,6 +21,12 @@ rendered observations, actions, and a goal coordinate; the goal cost usually
 uses positions decoded from predicted tokens by the probe. The environment's
 true position is not passed into that cost in the default `--cost probe` mode.
 
+This describes the original vision-only experiments. A separate top-down
+proprioceptive extension now trains with position and velocity alongside the
+patch tokens and actions, and plans with a latent goal cost. Its code and
+commands are documented in `docs/proprio_pointmaze.md`; the original scripts
+and checkpoints remain available.
+
 ## Repositories, code, and experiment files
 
 - `../point-maze/random_episodes.py` generates raw PointMaze episodes. This is
@@ -65,18 +71,23 @@ src/mylonas_ijepa_wm/
     │   ├── spatial_softmax_mlp 2/
     │   ├── spatial_softmax_mlp 3/
     │   └── spatial_softmax_mlp 4/
-    └── world_models/{full_deafult_v1,full_deafult_v1_k3}/
+    └── world_models/{full_default_v1,full_deafult_v1_k3}/
 ```
 
 The `full_deafult_*` names really are misspelled on disk. The top-down
-`world_models/` directories currently contain no checkpoint files locally;
-the trained top-down WM checkpoints have been used from Google Drive. The
+`full_default_v1/` directory now contains local `best.pt` and `last.pt`
+checkpoints. The
 latest locally copied top-down probe is
 `topdown/position_probe_runs/spatial_softmax_mlp 4/best.pt`. Directory names
 ending in ` 2`, ` 3`, or ` 4` contain spaces and must be quoted in shell
-commands. Only a small subset of raw/cache files is present locally; the full
-2,000-episode cache and top-down WM runs are on Drive/Colab. These artifacts
-are untracked, so do not assume a fresh clone contains them.
+commands. The top-down latent cache currently contains all 2,000 paired
+latent and trajectory sidecar files locally; raw frames are not required for
+the proprioceptive extension. These artifacts are untracked, so do not assume
+a fresh clone contains them.
+
+For the proprioceptive extension, all 2,000 local top-down cache pairs were
+checked for expected latent, sampled-state, action, and frame-index shapes;
+the states and actions were finite.
 
 Run the following module entry points from the **I-JEPA repository root**;
 each exposes its current CLI arguments with `--help`:
@@ -87,6 +98,8 @@ python -m src.mylonas_ijepa_wm.wm --help
 python -m src.mylonas_ijepa_wm.position_probe --help
 python -m src.mylonas_ijepa_wm.evaluate_rollouts --help
 python -m src.mylonas_ijepa_wm.plan_pointmaze --help
+python -m src.mylonas_ijepa_wm.wm_proprio --help
+python -m src.mylonas_ijepa_wm.plan_pointmaze_proprio --help
 ```
 
 Generate raw episodes from the separate `point-maze` repository with
