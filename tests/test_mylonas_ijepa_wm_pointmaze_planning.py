@@ -23,6 +23,51 @@ def count_green_ball_pixels(frame):
 
 
 class TopDownPlanningCameraTest(unittest.TestCase):
+    def test_angled_camera_matches_environment_default(self):
+        import gymnasium as gym
+        import gymnasium_robotics
+
+        gym.register_envs(gymnasium_robotics)
+        baseline = gym.make(
+            "PointMaze_UMaze-v3",
+            render_mode="rgb_array",
+            width=224,
+            height=224,
+            continuing_task=True,
+            reset_target=True,
+            max_episode_steps=100,
+        )
+        angled = plan_pointmaze.create_environment(
+            environment_id="PointMaze_UMaze-v3",
+            max_micro_steps=100,
+            camera="angled",
+        )
+        topdown = plan_pointmaze.create_environment(
+            environment_id="PointMaze_UMaze-v3",
+            max_micro_steps=100,
+            camera="topdown",
+        )
+        try:
+            for environment in (baseline, angled, topdown):
+                environment.reset(seed=0)
+                plan_pointmaze.hide_goal_marker(environment)
+
+            baseline_frame = baseline.render()
+            angled_frame = angled.render()
+            topdown_frame = topdown.render()
+            np.testing.assert_array_equal(angled_frame, baseline_frame)
+            self.assertFalse(np.array_equal(topdown_frame, baseline_frame))
+
+            baseline_goal = plan_pointmaze.render_target_observation(baseline)
+            angled_goal = plan_pointmaze.render_target_observation(angled)
+            topdown_goal = plan_pointmaze.render_target_observation(topdown)
+            np.testing.assert_array_equal(angled_goal, baseline_goal)
+            self.assertFalse(np.array_equal(topdown_goal, baseline_goal))
+        finally:
+            baseline.close()
+            angled.close()
+            topdown.close()
+
     def test_ball_remains_visible_above_middle_wall(self):
         environment = plan_pointmaze.create_environment(
             environment_id="PointMaze_UMaze-v3",
@@ -772,6 +817,13 @@ class FailureDiagnosticOutputTest(unittest.TestCase):
 
 
 class PlanningParserTest(unittest.TestCase):
+    def test_camera_selection_defaults_to_topdown_and_accepts_angled(self):
+        self.assertEqual(plan_pointmaze.parse_args([]).camera, "topdown")
+        self.assertEqual(
+            plan_pointmaze.parse_args(["--camera", "angled"]).camera,
+            "angled",
+        )
+
     def test_uses_colab_configurable_planning_defaults(self):
         args = plan_pointmaze.parse_args([])
 

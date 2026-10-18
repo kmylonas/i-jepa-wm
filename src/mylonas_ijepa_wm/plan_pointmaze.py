@@ -80,6 +80,12 @@ def parse_args(argv=None):
         default=DEFAULT_WORLD_MODEL_CHECKPOINT,
     )
     parser.add_argument(
+        "--camera",
+        choices=["topdown", "angled"],
+        default="topdown",
+        help="Camera view used for planning observations, goal, and videos.",
+    )
+    parser.add_argument(
         "--position-probe-checkpoint",
         type=Path,
         default=DEFAULT_POSITION_PROBE_CHECKPOINT,
@@ -823,7 +829,10 @@ def run_planning_episode(
     }
 
 
-def create_environment(environment_id, max_micro_steps):
+def create_environment(environment_id, max_micro_steps, camera="topdown"):
+    if camera not in {"topdown", "angled"}:
+        raise ValueError(f"unknown camera: {camera}")
+
     import gymnasium as gym
     import gymnasium_robotics
 
@@ -837,15 +846,16 @@ def create_environment(environment_id, max_micro_steps):
         reset_target=True,
         max_episode_steps=max_micro_steps,
     )
-    camera_config = {
-        "distance": 7.0,
-        "azimuth": 90.0,
-        "elevation": -90.0,
-        "lookat": np.array([0.0, 0.0, 0.0], dtype=np.float64),
-    }
-    environment.unwrapped.point_env.mujoco_renderer.default_cam_config.update(
-        camera_config
-    )
+    if camera == "topdown":
+        camera_config = {
+            "distance": 7.0,
+            "azimuth": 90.0,
+            "elevation": -90.0,
+            "lookat": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        }
+        environment.unwrapped.point_env.mujoco_renderer.default_cam_config.update(
+            camera_config
+        )
     return environment
 
 
@@ -1182,6 +1192,7 @@ def main(argv=None):
     if probe_epoch is not None:
         print(f"Position-probe epoch: {probe_epoch + 1}")
     print(f"Cost: {args.cost}")
+    print(f"Camera: {args.camera}")
     print(
         f"CEM: H={args.planning_horizon}, "
         f"population={args.population}, elites={args.num_elites}, "
@@ -1191,6 +1202,7 @@ def main(argv=None):
     environment = create_environment(
         environment_id=args.environment_id,
         max_micro_steps=args.max_macro_steps * 5,
+        camera=args.camera,
     )
     wall_rectangles = None
     if args.failure_diagnostics_dir is not None:
@@ -1279,6 +1291,7 @@ def main(argv=None):
                 else None
             ),
             "environment_id": args.environment_id,
+            "camera": args.camera,
             "cost": args.cost,
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,
