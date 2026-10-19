@@ -97,15 +97,24 @@ not directly comparable to the previous vision-only setup. A comparison
 should use the same top-down episodes, encoder, planning budget, and goal
 cost, with proprioception as the only changed input.
 
-## Evaluate visual-token rollouts
+## Evaluate visual and proprioceptive rollouts
 
-The proprioceptive rollout evaluator plots visual latent MSE at each horizon
-for three predictions: teacher-forced (real visual and state history at every
-step), autoregressive (predicted visual and state histories after the initial
-context), and persistence (the last observed visual latent held fixed). It
-uses the checkpoint's saved split IDs and action/state normalization. The MSE
-is averaged over all evaluated windows, patches, and embedding dimensions at
-each horizon. It does not require a position probe or the I-JEPA encoder.
+The proprioceptive rollout evaluator plots three panels at each horizon:
+visual latent MSE, normalized `(x, y, vx, vy)` MSE, and their weighted sum.
+Each panel compares teacher-forced predictions (real visual and state history
+at every step), autoregressive predictions (predicted visual and state
+histories after the initial context), and persistence (both last observed
+visual latent and last observed state held fixed). The combined value is
+`latent MSE + proprio_loss_weight * state MSE`, with the weight read from the
+checkpoint. All methods use the same episode windows. This per-horizon
+diagnostic is distinct from the training validation loss, which also averages
+predictions over the model's history positions.
+
+The evaluator uses the checkpoint's saved split IDs and action/state
+normalization. At each horizon, visual MSE is averaged over all windows,
+patches, and embedding dimensions; state MSE is averaged over all windows and
+four normalized state components. It does not require a position probe or the
+I-JEPA encoder.
 
 ```bash
 python -u -m src.mylonas_ijepa_wm.evaluate_rollouts_proprio \
@@ -113,8 +122,8 @@ python -u -m src.mylonas_ijepa_wm.evaluate_rollouts_proprio \
   --latent-dir /path/to/topdown/ijepa_cache/latents \
   --trajectory-dir /path/to/topdown/ijepa_cache/trajectories \
   --split test --horizon 10 --batch-size 4 \
-  --output /path/to/proprio_v1/rollout_test_h10_latent.json \
-  --plot-output /path/to/proprio_v1/rollout_test_h10_latent.png \
+  --output /path/to/proprio_v1/rollout_test_h10_metrics.json \
+  --plot-output /path/to/proprio_v1/rollout_test_h10_metrics.png \
   --device cuda --precision auto
 ```
 

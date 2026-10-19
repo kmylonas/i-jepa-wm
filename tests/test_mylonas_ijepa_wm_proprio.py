@@ -186,6 +186,7 @@ class ProprioRolloutEvaluationTest(unittest.TestCase):
             data_loader=torch.utils.data.DataLoader(OneSequence(), batch_size=1),
             device=torch.device("cpu"),
             num_hist=2,
+            proprio_loss_weight=2.0,
         )
 
         self.assertEqual(metrics["num_samples"], 1)
@@ -195,14 +196,27 @@ class ProprioRolloutEvaluationTest(unittest.TestCase):
                 "autoregressive_mse": 1.0,
                 "teacher_forced_mse": 1.0,
                 "persistence_mse": 4.0,
+                "autoregressive_proprio_mse": 1.0,
+                "teacher_forced_proprio_mse": 1.0,
+                "persistence_proprio_mse": 4.0,
+                "autoregressive_combined_mse": 3.0,
+                "teacher_forced_combined_mse": 3.0,
+                "persistence_combined_mse": 12.0,
             },
             {
                 "horizon": 2,
                 "autoregressive_mse": 16.0,
                 "teacher_forced_mse": 25.0,
                 "persistence_mse": 25.0,
+                "autoregressive_proprio_mse": 1.0,
+                "teacher_forced_proprio_mse": 0.0,
+                "persistence_proprio_mse": 12.25,
+                "autoregressive_combined_mse": 18.0,
+                "teacher_forced_combined_mse": 25.0,
+                "persistence_combined_mse": 49.5,
             },
         ])
+        self.assertEqual(metrics["proprio_loss_weight"], 2.0)
 
     def test_cli_saves_metrics_and_latent_plot_for_checkpoint_test_split(self):
         from src.mylonas_ijepa_wm import evaluate_rollouts_proprio
@@ -242,6 +256,7 @@ class ProprioRolloutEvaluationTest(unittest.TestCase):
                         "normalize_actions": False,
                         "state_mean": torch.zeros(4),
                         "state_std": torch.ones(4),
+                        "proprio_loss_weight": 2.0,
                     },
                 },
                 checkpoint,
@@ -266,6 +281,13 @@ class ProprioRolloutEvaluationTest(unittest.TestCase):
             self.assertEqual(saved["episode_ids"], [7])
             self.assertEqual(saved["checkpoint_epoch"], 2)
             self.assertEqual([row["horizon"] for row in saved["per_horizon"]], [1, 2])
+            self.assertEqual(saved["proprio_loss_weight"], 2.0)
+            for row in saved["per_horizon"]:
+                for method in ("autoregressive", "teacher_forced", "persistence"):
+                    self.assertAlmostEqual(
+                        row[f"{method}_combined_mse"],
+                        row[f"{method}_mse"] + 2.0 * row[f"{method}_proprio_mse"],
+                    )
             self.assertEqual(plot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 

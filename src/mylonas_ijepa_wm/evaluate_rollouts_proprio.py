@@ -35,22 +35,37 @@ def parse_args(argv=None):
 
 
 def teacher_forced_rollout(model, latent_window, state_window, actions, num_hist):
-    """Predict each future latent from the corresponding real visual/state history."""
-    predictions = []
+    """Predict future visual tokens and states from real histories."""
+    visual_predictions = []
+    state_predictions = []
     for step in range(latent_window.shape[1] - num_hist):
-        visual, _ = model(
+        visual, state = model(
             latent_window[:, step:step + num_hist],
             state_window[:, step:step + num_hist],
             actions[:, step:step + num_hist],
         )
-        predictions.append(visual[:, -1])
-    return torch.stack(predictions, dim=1)
+        visual_predictions.append(visual[:, -1])
+        state_predictions.append(state[:, -1])
+    return (
+        torch.stack(visual_predictions, dim=1),
+        torch.stack(state_predictions, dim=1),
+    )
 
 
-def evaluate_model(model, data_loader, device, num_hist, precision="fp32", log_every=0):
+def evaluate_model(
+    model, data_loader, device, num_hist,
+    precision="fp32", log_every=0, proprio_loss_weight=1.0,
+):
+    if proprio_loss_weight <= 0:
+        raise ValueError("proprio_loss_weight must be positive")
     model.eval()
-    sums = {name: None for name in ("autoregressive", "teacher_forced", "persistence")}
-    elements_per_horizon = 0
+    methods = ("autoregressive", "teacher_forced", "persistence")
+    sums = {
+        modality: {name: None for name in methods}
+        for modality in ("latent", "proprio")
+    }
+    latent_elements_per_horizon = 0
+    proprio_elements_per_horizon = 0
     num_samples = 0
     started_at = time.perf_counter()
     non_blocking = device.type == "cuda"
@@ -66,31 +81,40 @@ def evaluate_model(model, data_loader, device, num_hist, precision="fp32", log_e
             actions = batch["actions"].to(
                 device=device, dtype=torch.float32, non_blocking=non_blocking,
             )
-            targets = latents[:, num_hist:]
+            latent_targets = latents[:, num_hist:]
+            state_targets = states[:, num_hist:]
             with torch.autocast(
                 device_type=device.type,
                 dtype=torch.bfloat16,
                 enabled=precision == "bf16",
             ):
-                autoregressive, _ = wm_proprio.autoregressive_rollout(
+                autoregressive = wm_proprio.autoregressive_rollout(
                     model, latents[:, :num_hist], states[:, :num_hist], actions,
                 )
                 teacher_forced = teacher_forced_rollout(
                     model, latents, states, actions, num_hist,
                 )
-            persistence = latents[:, num_hist - 1:num_hist].expand_as(targets)
+            persistence = (
+                latents[:, num_hist - 1:num_hist].expand_as(latent_targets),
+                states[:, num_hist - 1:num_hist].expand_as(state_targets),
+            )
 
-            for name, predictions in (
+            for name, (visual_predictions, state_predictions) in (
                 ("autoregressive", autoregressive),
                 ("teacher_forced", teacher_forced),
                 ("persistence", persistence),
             ):
-                batch_sse = (predictions.float() - targets).square().sum(dim=(0, 2, 3))
-                if sums[name] is None:
-                    sums[name] = torch.zeros_like(batch_sse)
-                sums[name] += batch_sse
-            elements_per_horizon += targets[:, 0].numel()
-            num_samples += targets.shape[0]
+                for modality, predictions, targets, dimensions in (
+                    ("latent", visual_predictions, latent_targets, (0, 2, 3)),
+                    ("proprio", state_predictions, state_targets, (0, 2)),
+                ):
+                    batch_sse = (predictions.float() - targets).square().sum(dim=dimensions)
+                    if sums[modality][name] is None:
+                        sums[modality][name] = torch.zeros_like(batch_sse)
+                    sums[modality][name] += batch_sse
+            latent_elements_per_horizon += latent_targets[:, 0].numel()
+            proprio_elements_per_horizon += state_targets[:, 0].numel()
+            num_samples += latent_targets.shape[0]
             if log_every > 0 and step % log_every == 0:
                 elapsed = time.perf_counter() - started_at
                 print(f"  batch {step}/{len(data_loader)} samples/s={num_samples / elapsed:.2f}")
@@ -98,19 +122,38 @@ def evaluate_model(model, data_loader, device, num_hist, precision="fp32", log_e
     if num_samples == 0:
         raise ValueError("no rollout windows for this split and horizon")
     mse = {
-        name: (value / elements_per_horizon).cpu().tolist()
-        for name, value in sums.items()
+        modality: {
+            name: (value / elements_per_horizon).cpu().tolist()
+            for name, value in sums[modality].items()
+        }
+        for modality, elements_per_horizon in (
+            ("latent", latent_elements_per_horizon),
+            ("proprio", proprio_elements_per_horizon),
+        )
     }
     return {
         "num_samples": num_samples,
+        "proprio_loss_weight": proprio_loss_weight,
         "per_horizon": [
             {
                 "horizon": index + 1,
-                "autoregressive_mse": mse["autoregressive"][index],
-                "teacher_forced_mse": mse["teacher_forced"][index],
-                "persistence_mse": mse["persistence"][index],
+                **{
+                    f"{name}_mse": mse["latent"][name][index]
+                    for name in methods
+                },
+                **{
+                    f"{name}_proprio_mse": mse["proprio"][name][index]
+                    for name in methods
+                },
+                **{
+                    f"{name}_combined_mse": (
+                        mse["latent"][name][index]
+                        + proprio_loss_weight * mse["proprio"][name][index]
+                    )
+                    for name in methods
+                },
             }
-            for index in range(len(mse["autoregressive"]))
+            for index in range(len(mse["latent"]["autoregressive"]))
         ],
     }
 
@@ -123,19 +166,31 @@ def save_metrics_plot(metrics, output_path):
 
     rows = metrics["per_horizon"]
     horizons = [row["horizon"] for row in rows]
-    figure, axis = plt.subplots(figsize=(8, 5), constrained_layout=True)
-    for key, label in (
-        ("autoregressive_mse", "Autoregressive"),
-        ("teacher_forced_mse", "Teacher-forced"),
-        ("persistence_mse", "Persistence"),
+    figure, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+    for axis, suffix, title, ylabel in (
+        (axes[0], "mse", "Visual latents", "Visual latent MSE"),
+        (axes[1], "proprio_mse", "Proprioception", "Normalized state MSE"),
+        (
+            axes[2], "combined_mse", "Combined",
+            f"Latent + {metrics['proprio_loss_weight']:g} × state MSE",
+        ),
     ):
-        axis.plot(horizons, [row[key] for row in rows], marker="o", label=label)
-    axis.set_xticks(horizons)
-    axis.set_xlabel("Rollout horizon (macro steps)")
-    axis.set_ylabel("Visual latent MSE")
-    axis.set_title(f"Proprioceptive world model — {metrics['split']} split")
-    axis.legend()
-    axis.grid(alpha=0.25)
+        for name, label in (
+            ("autoregressive", "Autoregressive"),
+            ("teacher_forced", "Teacher-forced"),
+            ("persistence", "Persistence"),
+        ):
+            axis.plot(
+                horizons, [row[f"{name}_{suffix}"] for row in rows],
+                marker="o", label=label,
+            )
+        axis.set_xticks(horizons)
+        axis.set_xlabel("Rollout horizon (macro steps)")
+        axis.set_ylabel(ylabel)
+        axis.set_title(title)
+        axis.legend()
+        axis.grid(alpha=0.25)
+    figure.suptitle(f"Proprioceptive world model — {metrics['split']} split")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=160)
     plt.close(figure)
@@ -157,6 +212,9 @@ def main(argv=None):
         torch.set_float32_matmul_precision("high")
     model, metadata, epoch = wm_proprio.load_model_and_metadata(args.checkpoint, device)
     model = wm.compile_model(model, enabled=args.compile)
+    proprio_loss_weight = metadata.get("proprio_loss_weight")
+    if proprio_loss_weight is None or proprio_loss_weight <= 0:
+        raise ValueError("checkpoint is missing a positive proprio_loss_weight")
     episode_ids = metadata.get(f"{args.split}_ids")
     if not episode_ids:
         raise ValueError(f"checkpoint has no {args.split}_ids")
@@ -195,6 +253,7 @@ def main(argv=None):
     print(f"Device: {device}, precision: {precision}")
     metrics = evaluate_model(
         model, loader, device, num_hist, precision=precision, log_every=args.log_every,
+        proprio_loss_weight=proprio_loss_weight,
     )
     metrics.update({
         "checkpoint": str(args.checkpoint),
@@ -205,17 +264,24 @@ def main(argv=None):
         "num_hist": num_hist,
         "max_horizon": args.horizon,
     })
-    output_path = args.output or args.checkpoint.parent / f"rollout_{args.split}_h{args.horizon}_latent.json"
+    output_path = args.output or args.checkpoint.parent / f"rollout_{args.split}_h{args.horizon}_metrics.json"
     plot_path = args.plot_output or output_path.with_suffix(".png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     save_metrics_plot(metrics, plot_path)
-    print("\nhorizon  autoregressive  teacher-forced  persistence")
-    for row in metrics["per_horizon"]:
-        print(
-            f"{row['horizon']:>7}  {row['autoregressive_mse']:>14.6f}  "
-            f"{row['teacher_forced_mse']:>14.6f}  {row['persistence_mse']:>11.6f}"
-        )
+    for label, suffix in (
+        ("visual latent MSE", "mse"),
+        ("normalized state MSE", "proprio_mse"),
+        (f"combined MSE (state weight {proprio_loss_weight:g})", "combined_mse"),
+    ):
+        print(f"\n{label}")
+        print("horizon  autoregressive  teacher-forced  persistence")
+        for row in metrics["per_horizon"]:
+            print(
+                f"{row['horizon']:>7}  {row[f'autoregressive_{suffix}']:>14.6f}  "
+                f"{row[f'teacher_forced_{suffix}']:>14.6f}  "
+                f"{row[f'persistence_{suffix}']:>11.6f}"
+            )
     print(f"Saved metrics to: {output_path}")
     print(f"Saved plot to: {plot_path}")
 
