@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -145,6 +146,127 @@ class ProprioModelTest(unittest.TestCase):
 
         torch.testing.assert_close(visual.flatten(), torch.tensor([1.0, 2.0]))
         torch.testing.assert_close(state[:, :, 0].flatten(), torch.tensor([1.0, 2.0]))
+
+
+class ProprioRolloutEvaluationTest(unittest.TestCase):
+    def test_teacher_forcing_and_autoregression_use_their_respective_state_histories(self):
+        from src.mylonas_ijepa_wm import evaluate_rollouts_proprio
+
+        class OneSequence(torch.utils.data.Dataset):
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, index):
+                return {
+                    "latent_window": torch.tensor([0.0, 1.0, 3.0, 6.0]).reshape(4, 1, 1),
+                    "state_window": torch.tensor([
+                        [0.0, 0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0, 0.0],
+                        [5.0, 0.0, 0.0, 0.0],
+                        [8.0, 0.0, 0.0, 0.0],
+                    ]),
+                    "actions": torch.tensor([[1.0], [2.0], [3.0]]),
+                }
+
+        class StateAndLatentDrivenModel(torch.nn.Module):
+            def forward(self, latents, states, actions):
+                visual = torch.zeros_like(latents)
+                state = torch.zeros_like(states)
+                visual[:, -1, 0, 0] = (
+                    latents[:, -1, 0, 0]
+                    + states[:, -1, 0]
+                    + actions[:, -1, 0]
+                )
+                state[:, -1] = states[:, -1]
+                state[:, -1, 0] += actions[:, -1, 0]
+                return visual, state
+
+        metrics = evaluate_rollouts_proprio.evaluate_model(
+            model=StateAndLatentDrivenModel(),
+            data_loader=torch.utils.data.DataLoader(OneSequence(), batch_size=1),
+            device=torch.device("cpu"),
+            num_hist=2,
+        )
+
+        self.assertEqual(metrics["num_samples"], 1)
+        self.assertEqual(metrics["per_horizon"], [
+            {
+                "horizon": 1,
+                "autoregressive_mse": 1.0,
+                "teacher_forced_mse": 1.0,
+                "persistence_mse": 4.0,
+            },
+            {
+                "horizon": 2,
+                "autoregressive_mse": 16.0,
+                "teacher_forced_mse": 25.0,
+                "persistence_mse": 25.0,
+            },
+        ])
+
+    def test_cli_saves_metrics_and_latent_plot_for_checkpoint_test_split(self):
+        from src.mylonas_ijepa_wm import evaluate_rollouts_proprio
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            latent_dir = root / "latents"
+            trajectory_dir = root / "trajectories"
+            latent_dir.mkdir()
+            trajectory_dir.mkdir()
+            np.save(latent_dir / "episode_0007.npy", np.zeros((5, 2, 3), dtype=np.float16))
+            torch.save(
+                {
+                    "sampled_states": torch.zeros(5, 4),
+                    "macro_actions": torch.zeros(4, 2),
+                },
+                trajectory_dir / "episode_0007.pt",
+            )
+            configuration = dict(
+                num_patches=2, num_hist=2, num_t_blocks=1, ijepa_dim=3,
+                action_dim=2, action_embed_dim=4, proprio_dim=4,
+                proprio_embed_dim=4, embed_dim=8, num_heads=2,
+                mlp_dim=16, dropout=0.0,
+            )
+            model = ProprioViT(**configuration)
+            checkpoint = root / "best.pt"
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "epoch": 2,
+                    "metadata": {
+                        "model_type": "proprio_v1",
+                        "camera": "topdown",
+                        "proprio_fields": ("x", "y", "vx", "vy"),
+                        "model_configuration": configuration,
+                        "test_ids": [7],
+                        "normalize_actions": False,
+                        "state_mean": torch.zeros(4),
+                        "state_std": torch.ones(4),
+                    },
+                },
+                checkpoint,
+            )
+            output = root / "metrics.json"
+            plot = root / "metrics.png"
+            evaluate_rollouts_proprio.main([
+                "--checkpoint", str(checkpoint),
+                "--latent-dir", str(latent_dir),
+                "--trajectory-dir", str(trajectory_dir),
+                "--split", "test",
+                "--horizon", "2",
+                "--batch-size", "1",
+                "--num-workers", "0",
+                "--device", "cpu",
+                "--precision", "fp32",
+                "--output", str(output),
+                "--plot-output", str(plot),
+            ])
+
+            saved = json.loads(output.read_text())
+            self.assertEqual(saved["episode_ids"], [7])
+            self.assertEqual(saved["checkpoint_epoch"], 2)
+            self.assertEqual([row["horizon"] for row in saved["per_horizon"]], [1, 2])
+            self.assertEqual(plot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
 if __name__ == "__main__":

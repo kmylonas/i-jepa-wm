@@ -96,3 +96,31 @@ Because the planner receives true position and velocity, its success rate is
 not directly comparable to the previous vision-only setup. A comparison
 should use the same top-down episodes, encoder, planning budget, and goal
 cost, with proprioception as the only changed input.
+
+## Evaluate visual-token rollouts
+
+The proprioceptive rollout evaluator plots visual latent MSE at each horizon
+for three predictions: teacher-forced (real visual and state history at every
+step), autoregressive (predicted visual and state histories after the initial
+context), and persistence (the last observed visual latent held fixed). It
+uses the checkpoint's saved split IDs and action/state normalization. The MSE
+is averaged over all evaluated windows, patches, and embedding dimensions at
+each horizon. It does not require a position probe or the I-JEPA encoder.
+
+```bash
+python -u -m src.mylonas_ijepa_wm.evaluate_rollouts_proprio \
+  --checkpoint /path/to/proprio_v1/best.pt \
+  --latent-dir /path/to/topdown/ijepa_cache/latents \
+  --trajectory-dir /path/to/topdown/ijepa_cache/trajectories \
+  --split test --horizon 10 --batch-size 4 \
+  --output /path/to/proprio_v1/rollout_test_h10_latent.json \
+  --plot-output /path/to/proprio_v1/rollout_test_h10_latent.png \
+  --device cuda --precision auto
+```
+
+With the default three-frame history, the 21-frame cached episodes support
+at most 18 future macro steps. A horizon of 10 uses nine overlapping windows
+per test episode. The figure and JSON are saved separately so the numerical
+values can be inspected or replotted later. On Colab, the cache may be read
+from Drive directly; copying just the checkpoint's test episodes to local
+storage is an optional speedup, and the full training cache is unnecessary.
