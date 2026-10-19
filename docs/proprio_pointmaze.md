@@ -133,3 +133,28 @@ per test episode. The figure and JSON are saved separately so the numerical
 values can be inspected or replotted later. On Colab, the cache may be read
 from Drive directly; copying just the checkpoint's test episodes to local
 storage is an optional speedup, and the full training cache is unnecessary.
+
+## Inspect individual state rollouts
+
+Use this separate command to plot only a few cached episodes. By default it
+uses the first four IDs in the checkpoint's test split and the first window
+of each episode, matching the older vision-only trajectory figure. The plot
+shows real, teacher-forced, and autoregressive positions in maze coordinates;
+velocity arrows appear at the middle and final horizons. The arrow scale is
+labeled on the figure. The saved JSON contains all four unnormalized state
+components at every plotted horizon.
+
+```bash
+python -u -m src.mylonas_ijepa_wm.visualize_proprio_rollouts \
+  --checkpoint /path/to/proprio_v1/best.pt \
+  --latent-dir /path/to/topdown/ijepa_cache/latents \
+  --trajectory-dir /path/to/topdown/ijepa_cache/trajectories \
+  --split test --horizon 10 --num-episodes 4 \
+  --output /path/to/proprio_v1/rollout_test_h10_state_trajectories.png \
+  --device mps --precision fp32
+```
+
+Use `--episode-ids ID1 ID2 ...` to inspect specific members of the selected
+checkpoint split. Each prediction starts from the last of three real history
+frames and uses the recorded macro actions. This is an open-loop diagnostic
+on cached trajectories, not a closed-loop planning rollout.

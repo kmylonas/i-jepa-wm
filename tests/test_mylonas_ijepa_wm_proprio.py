@@ -291,5 +291,58 @@ class ProprioRolloutEvaluationTest(unittest.TestCase):
             self.assertEqual(plot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
+class ProprioTrajectoryVisualizationTest(unittest.TestCase):
+    def test_state_paths_use_real_teacher_forced_and_predicted_histories_in_maze_units(self):
+        from src.mylonas_ijepa_wm import visualize_proprio_rollouts
+
+        class StateDrivenModel(torch.nn.Module):
+            def forward(self, latents, states, actions):
+                visual = torch.zeros_like(latents)
+                predicted_states = torch.zeros_like(states)
+                predicted_states[:, -1] = states[:, -1]
+                predicted_states[:, -1, (0, 2)] += actions[:, -1, 0].unsqueeze(-1)
+                return visual, predicted_states
+
+        sample = {
+            "latent_window": torch.zeros(4, 1, 1),
+            "state_window": torch.tensor([
+                [0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0, 0.0],
+                [5.0, 0.0, 5.0, 0.0],
+                [8.0, 0.0, 8.0, 0.0],
+            ]),
+            "actions": torch.tensor([[1.0], [2.0], [3.0]]),
+        }
+        trajectory = visualize_proprio_rollouts.predict_state_trajectory(
+            model=StateDrivenModel(),
+            sample=sample,
+            num_hist=2,
+            episode_id=7,
+            state_mean=torch.tensor([10.0, 20.0, 30.0, 40.0]),
+            state_std=torch.tensor([2.0, 3.0, 4.0, 5.0]),
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(trajectory["episode_id"], 7)
+        self.assertEqual(trajectory["start"], 0)
+        torch.testing.assert_close(
+            trajectory["true"][:, (0, 2)],
+            torch.tensor([[12.0, 34.0], [20.0, 50.0], [26.0, 62.0]]),
+        )
+        torch.testing.assert_close(
+            trajectory["autoregressive"][:, (0, 2)],
+            torch.tensor([[12.0, 34.0], [16.0, 42.0], [22.0, 54.0]]),
+        )
+        torch.testing.assert_close(
+            trajectory["teacher_forced"][:, (0, 2)],
+            torch.tensor([[12.0, 34.0], [16.0, 42.0], [26.0, 62.0]]),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "positions.png"
+            visualize_proprio_rollouts.save_trajectory_plot([trajectory], output)
+            self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+
 if __name__ == "__main__":
     unittest.main()
