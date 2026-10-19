@@ -18,7 +18,10 @@ from src.mylonas_ijepa_wm.planning import (
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Plan using top-down images, true proprioception, and latent goal cost."
+        description=(
+            "Plan using top-down images, true proprioception, "
+            "and a latent or position goal cost."
+        )
     )
     parser.add_argument(
         "--encoder-checkpoint", type=Path,
@@ -27,8 +30,9 @@ def parse_args(argv=None):
     parser.add_argument("--world-model-checkpoint", type=Path, required=True)
     parser.add_argument(
         "--output", type=Path,
-        default=wm_proprio.DEFAULT_OUTPUT / "planning_latent.json",
+        default=None,
     )
+    parser.add_argument("--cost", choices=["latent", "position"], default="latent")
     parser.add_argument("--video-dir", type=Path)
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument("--environment-id", default="PointMaze_UMaze-v3")
@@ -102,6 +106,25 @@ def rollout_action_sequences(
     return torch.cat(visual_chunks, dim=0), torch.cat(state_chunks, dim=0)
 
 
+def compute_terminal_position_cost(predicted_states, goal_position, state_mean, state_std):
+    """Euclidean distance from the predicted terminal position to the maze goal."""
+    if predicted_states.ndim != 3 or predicted_states.shape[-1] != 4:
+        raise ValueError("predicted_states must have shape [population, horizon, 4]")
+    terminal_xy = predicted_states[:, -1, :2].float()
+    mean_xy = torch.as_tensor(
+        state_mean, device=terminal_xy.device, dtype=torch.float32
+    )[:2]
+    std_xy = torch.as_tensor(
+        state_std, device=terminal_xy.device, dtype=torch.float32
+    )[:2]
+    goal_xy = torch.as_tensor(
+        goal_position, device=terminal_xy.device, dtype=torch.float32
+    )
+    if mean_xy.shape != (2,) or std_xy.shape != (2,) or goal_xy.shape != (2,):
+        raise ValueError("state normalization and goal position must contain x and y")
+    return torch.linalg.vector_norm(terminal_xy * std_xy + mean_xy - goal_xy, dim=-1)
+
+
 def plan_action(
     model,
     latent_history,
@@ -121,12 +144,25 @@ def plan_action(
     precision="fp32",
     min_std=0.05,
     generator=None,
+    cost="latent",
+    goal_position=None,
+    state_mean=None,
+    state_std=None,
 ):
+    if cost not in {"latent", "position"}:
+        raise ValueError(f"unknown cost mode: {cost}")
+    if cost == "latent" and target_latent is None:
+        raise ValueError("latent cost requires target_latent")
+    if cost == "position" and any(
+        value is None for value in (goal_position, state_mean, state_std)
+    ):
+        raise ValueError("position cost requires goal_position, state_mean, and state_std")
+
     def score_candidates(candidates):
         costs = []
         for start in range(0, len(candidates), candidate_batch_size):
             chunk = candidates[start:start + candidate_batch_size]
-            predicted_visual, _ = rollout_action_sequences(
+            predicted_visual, predicted_states = rollout_action_sequences(
                 model,
                 latent_history.unsqueeze(0),
                 state_history.unsqueeze(0),
@@ -138,11 +174,19 @@ def plan_action(
                 action_std=action_std,
                 precision=precision,
             )
-            costs.append(compute_terminal_cost(
-                predicted_latents=predicted_visual,
-                target_latent=target_latent,
-                mode="latent",
-            ))
+            if cost == "latent":
+                costs.append(compute_terminal_cost(
+                    predicted_latents=predicted_visual,
+                    target_latent=target_latent,
+                    mode="latent",
+                ))
+            else:
+                costs.append(compute_terminal_position_cost(
+                    predicted_states=predicted_states,
+                    goal_position=goal_position,
+                    state_mean=state_mean,
+                    state_std=state_std,
+                ))
         return torch.cat(costs, dim=0)
 
     return cem_optimize(
@@ -179,12 +223,18 @@ def run_planning_episode(
     min_std=0.05,
     generator=None,
     frame_callback=None,
+    cost="latent",
 ):
     observation, reset_info = env.reset(seed=seed)
     base.hide_goal_marker(env)
     initial_latent = base.encode_frame(encoder, base.validate_frame(env.render()), device, precision)
-    target_latent = base.encode_frame(
-        encoder, base.render_target_observation(env), device, precision
+    target_latent = None
+    if cost == "latent":
+        target_latent = base.encode_frame(
+            encoder, base.render_target_observation(env), device, precision
+        )
+    goal_position = torch.as_tensor(
+        observation["desired_goal"][:2], device=device, dtype=torch.float32
     )
     if frame_callback is not None:
         frame_callback(base.render_visualization_frame(env))
@@ -232,6 +282,10 @@ def run_planning_episode(
             precision=precision,
             min_std=min_std,
             generator=generator,
+            cost=cost,
+            goal_position=goal_position,
+            state_mean=state_mean,
+            state_std=state_std,
         )
         macro_action = plan.action_sequence[0].detach().cpu()
         result = base.execute_macro_action(
@@ -266,7 +320,7 @@ def run_planning_episode(
     return {
         "seed": seed,
         "camera": "topdown",
-        "cost_mode": "latent",
+        "cost_mode": cost,
         "success": success,
         "terminated": terminated,
         "truncated": truncated,
@@ -284,6 +338,8 @@ def run_planning_episode(
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.output is None:
+        args.output = wm_proprio.DEFAULT_OUTPUT / f"planning_{args.cost}.json"
     for name in ("encoder_checkpoint", "world_model_checkpoint"):
         if not getattr(args, name).is_file():
             raise FileNotFoundError(getattr(args, name))
@@ -317,7 +373,7 @@ def main(argv=None):
     )
     records = []
     print(f"Device: {device}, precision: {precision}, camera: topdown")
-    print(f"World-model epoch: {epoch + 1}, cost: latent")
+    print(f"World-model epoch: {epoch + 1}, cost: {args.cost}")
     try:
         for episode_index in range(args.num_episodes):
             seed = args.base_seed + episode_index
@@ -342,6 +398,7 @@ def main(argv=None):
                 min_std=args.min_std,
                 generator=base._create_generator(device, seed),
                 frame_callback=frames.append if frames is not None else None,
+                cost=args.cost,
             )
             record["video_path"] = None
             if frames is not None:
@@ -368,7 +425,7 @@ def main(argv=None):
             "world_model_checkpoint": str(args.world_model_checkpoint),
             "world_model_epoch": epoch,
             "camera": "topdown",
-            "cost": "latent",
+            "cost": args.cost,
             "environment_id": args.environment_id,
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,

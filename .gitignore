@@ -24,6 +24,7 @@ src/mylonas_ijepa_wm/position_probe_runs/
 src/mylonas_ijepa_wm/angled/
 src/mylonas_ijepa_wm/topdown/
 src/mylonas_ijepa_wm/debug
+src/mylonas_ijepa_wm/proprio
 
 # World-model tests
 !tests/test_mylonas_ijepa_wm_training.py
@@ -35,3 +36,4 @@ src/mylonas_ijepa_wm/debug
 !tests/test_mylonas_ijepa_wm_proprio.py
 !tests/test_mylonas_ijepa_wm_proprio_planning.py
 !tests/test_mylonas_ijepa_embedding_similarity.py
+!tests/test_mylonas_ijepa_goal_latent_cost.py

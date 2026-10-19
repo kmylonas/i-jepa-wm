@@ -54,21 +54,60 @@ class ProprioPlanningTest(unittest.TestCase):
                 },
             }, checkpoint)
 
-            with patch.object(plan_pointmaze, "load_frozen_ijepa_encoder", return_value=TinyEncoder()):
-                plan_pointmaze_proprio.main([
-                    "--encoder-checkpoint", str(encoder_checkpoint),
-                    "--world-model-checkpoint", str(checkpoint),
-                    "--output", str(output),
-                    "--num-episodes", "1", "--max-macro-steps", "1",
-                    "--planning-horizon", "1", "--population", "2",
-                    "--num-elites", "1", "--cem-iterations", "1",
-                    "--candidate-batch-size", "2", "--device", "cpu",
-                ])
+            for cost in ("latent", "position"):
+                with self.subTest(cost=cost):
+                    with patch.object(plan_pointmaze, "load_frozen_ijepa_encoder", return_value=TinyEncoder()):
+                        plan_pointmaze_proprio.main([
+                            "--encoder-checkpoint", str(encoder_checkpoint),
+                            "--world-model-checkpoint", str(checkpoint),
+                            "--output", str(output), "--cost", cost,
+                            "--num-episodes", "1", "--max-macro-steps", "1",
+                            "--planning-horizon", "1", "--population", "2",
+                            "--num-elites", "1", "--cem-iterations", "1",
+                            "--candidate-batch-size", "2", "--device", "cpu",
+                        ])
 
-            result = json.loads(output.read_text())
-            self.assertEqual(result["configuration"]["camera"], "topdown")
-            self.assertEqual(result["configuration"]["cost"], "latent")
-            self.assertEqual(len(result["episodes"]), 1)
+                    result = json.loads(output.read_text())
+                    self.assertEqual(result["configuration"]["camera"], "topdown")
+                    self.assertEqual(result["configuration"]["cost"], cost)
+                    self.assertEqual(result["episodes"][0]["cost_mode"], cost)
+                    self.assertEqual(len(result["episodes"]), 1)
+
+    def test_position_cost_uses_terminal_unnormalized_xy(self):
+        predicted_states = torch.tensor([
+            [[9.0, 9.0, 0.0, 0.0], [1.0, 1.0, 100.0, -100.0]],
+            [[1.0, 1.0, 0.0, 0.0], [2.0, 1.0, 0.0, 0.0]],
+        ])
+        costs = plan_pointmaze_proprio.compute_terminal_position_cost(
+            predicted_states=predicted_states,
+            goal_position=torch.tensor([12.0, 24.0]),
+            state_mean=torch.tensor([10.0, 20.0, 0.0, 0.0]),
+            state_std=torch.tensor([2.0, 4.0, 1.0, 1.0]),
+        )
+        torch.testing.assert_close(costs, torch.tensor([0.0, 2.0]))
+
+    def test_position_planner_scores_world_model_states(self):
+        plan = plan_pointmaze_proprio.plan_action(
+            model=StateDrivenModel(),
+            latent_history=torch.zeros(1, 1, 1),
+            state_history=torch.zeros(1, 4),
+            action_history=torch.empty(0, 1),
+            target_latent=None,
+            action_low=torch.tensor([0.0]),
+            action_high=torch.tensor([2.0]),
+            device=torch.device("cpu"),
+            planning_horizon=1,
+            population=64,
+            num_elites=8,
+            num_iterations=4,
+            candidate_batch_size=16,
+            cost="position",
+            goal_position=torch.tensor([13.0, 26.0]),
+            state_mean=torch.tensor([10.0, 20.0, 0.0, 0.0]),
+            state_std=torch.tensor([2.0, 4.0, 1.0, 1.0]),
+            generator=torch.Generator().manual_seed(0),
+        )
+        self.assertAlmostEqual(plan.action_sequence[0, 0].item(), 1.5, delta=0.2)
 
     def test_candidate_rollout_updates_predicted_proprioception(self):
         visual, states = plan_pointmaze_proprio.rollout_action_sequences(

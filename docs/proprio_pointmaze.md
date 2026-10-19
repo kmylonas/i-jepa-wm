@@ -5,9 +5,10 @@ sample supplies three consecutive patch-token frames, the corresponding
 `(x, y, vx, vy)` states, and macro actions. It predicts the next patch tokens
 **and** next state. During planning, the current state comes from the
 environment observation; subsequent states inside each imagined rollout come
-from the world model. CEM scores candidates by distance between the predicted
-terminal patch tokens and the encoded goal image. It does not use a position
-probe.
+from the world model. CEM can score candidates using either predicted terminal
+patch tokens against the encoded goal image (`--cost latent`) or the world
+model's predicted terminal `(x, y)` against the simulator goal position
+(`--cost position`). It does not use a position probe.
 
 The original `wm.py`, `vit.py`, and `plan_pointmaze.py` remain available for
 vision-only experiments. Proprioceptive runs use separate checkpoints and
@@ -71,7 +72,7 @@ You can pass other existing training flags, such as `--batch-size`,
 the full model is intended for a CUDA GPU. A small CPU smoke test works, but
 the full 2,000-episode run is not practical on a laptop CPU.
 
-## Plan with latent cost
+## Plan with latent or position cost
 
 Use the same frozen I-JEPA encoder checkpoint used to make the cache:
 
@@ -80,6 +81,7 @@ python -u -m src.mylonas_ijepa_wm.plan_pointmaze_proprio \
   --encoder-checkpoint /path/to/ijepa_encoder.pt \
   --world-model-checkpoint src/mylonas_ijepa_wm/topdown/world_models/proprio_v1/best.pt \
   --output src/mylonas_ijepa_wm/topdown/world_models/proprio_v1/planning_latent.json \
+  --cost latent \
   --video-dir src/mylonas_ijepa_wm/topdown/world_models/proprio_v1/videos \
   --num-episodes 20 --base-seed 0 --max-macro-steps 20 \
   --planning-horizon 3 --population 256 --num-elites 32 \
@@ -87,15 +89,44 @@ python -u -m src.mylonas_ijepa_wm.plan_pointmaze_proprio \
   --device cuda --precision auto --compile
 ```
 
-The camera and cost are fixed to top-down and latent respectively. No probe
-checkpoint is required. Omit `--video-dir` if videos are unnecessary. The
-JSON records success, actions, achieved positions, and the measured
-proprioceptive states at each replan.
+To plan with the model's predicted ball position, change the flag to
+`--cost position` and use a separate output path such as
+`planning_position.json`. The planner converts each predicted terminal
+`(x, y)` from checkpoint-normalized coordinates back to maze coordinates and
+scores its Euclidean distance to the actual goal position. The camera remains
+top-down, and no probe checkpoint is required. If `--output` is omitted, the
+default filename includes the selected cost. Omit `--video-dir` if videos are
+unnecessary. The JSON records the cost mode, success, actions, achieved
+positions, and the measured proprioceptive states at each replan.
 
 Because the planner receives true position and velocity, its success rate is
 not directly comparable to the previous vision-only setup. A comparison
 should use the same top-down episodes, encoder, planning budget, and goal
 cost, with proprioception as the only changed input.
+
+## Check whether the latent goal cost tracks ball distance
+
+Run this smaller diagnostic locally from the repository root. It uses the same
+top-down camera and frozen I-JEPA encoder as planning; it needs neither a
+world-model checkpoint nor the episode cache.
+
+```bash
+conda activate pointmaze
+python -m src.mylonas_ijepa_wm.goal_latent_cost \
+  --encoder-checkpoint src/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar \
+  --output-dir src/mylonas_ijepa_wm/debug/goal_latent_cost \
+  --device mps
+```
+
+The script picks six spatially separated valid simulator goals from seeded
+resets. For each goal, it renders the green ball at the exact goal with zero
+velocity and then at up to four collision-free positions in each distance
+bin. The red marker is hidden in every encoded image, as in the planner.
+`samples.csv` records each true ball-to-goal distance and the MSE across all
+matching patch features; `per_goal.png`, `pooled.png`, and the close-range
+`pooled_near.png` show the relationship.
+Saved `goal_XX.png`, `near_XX.png`, and `far_XX.png` images allow a camera check.
+Pass `--num-goals`, `--per-bin`, or `--batch-size` to change the workload.
 
 ## Evaluate visual and proprioceptive rollouts
 
