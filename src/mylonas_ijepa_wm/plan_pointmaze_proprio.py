@@ -35,6 +35,7 @@ def parse_args(argv=None):
     parser.add_argument("--cost", choices=["latent", "position"], default="latent")
     parser.add_argument("--video-dir", type=Path)
     parser.add_argument("--video-fps", type=int, default=10)
+    parser.add_argument("--plan-trace-dir", type=Path)
     parser.add_argument("--environment-id", default="PointMaze_UMaze-v3")
     parser.add_argument("--num-episodes", type=int, default=20)
     parser.add_argument("--base-seed", type=int, default=0)
@@ -226,6 +227,7 @@ def run_planning_episode(
     generator=None,
     frame_callback=None,
     cost="latent",
+    collect_plan_traces=False,
 ):
     if not 1 <= actions_per_plan <= planning_horizon:
         raise ValueError("actions_per_plan must be between 1 and planning_horizon")
@@ -258,6 +260,7 @@ def run_planning_episode(
     positions = [np.asarray(observation["achieved_goal"], dtype=np.float32).tolist()]
     proprio_states = [initial_state.tolist()]
     macro_actions = []
+    plan_traces = []
     total_micro_steps = 0
     success = bool(reset_info.get("success", False))
     terminated = truncated = False
@@ -289,6 +292,32 @@ def run_planning_episode(
             state_mean=state_mean,
             state_std=state_std,
         )
+        trace = None
+        if collect_plan_traces:
+            _, predicted_states = rollout_action_sequences(
+                model=model,
+                latent_history=latent_history.unsqueeze(0),
+                state_history=state_history.unsqueeze(0),
+                action_history=action_history,
+                candidate_actions=plan.action_sequence.unsqueeze(0),
+                device=device,
+                chunk_size=1,
+                action_mean=action_mean,
+                action_std=action_std,
+                precision=precision,
+            )
+            trace = {
+                "plan_index": len(plan_traces),
+                "start_macro_step": len(macro_actions),
+                "start_state": proprio_states[-1],
+                "selected_actions": plan.action_sequence.detach().cpu().tolist(),
+                "predicted_states": (
+                    predicted_states[0].float() * state_std + state_mean
+                ).cpu().tolist(),
+                "actual_states": [proprio_states[-1]],
+                "planner_cost": plan.cost,
+            }
+            plan_traces.append(trace)
         num_actions = min(actions_per_plan, max_macro_steps - len(macro_actions))
         for macro_action in plan.action_sequence[:num_actions]:
             macro_action = macro_action.detach().cpu()
@@ -315,6 +344,8 @@ def run_planning_episode(
             macro_actions.append(macro_action.tolist())
             positions.append(np.asarray(observation["achieved_goal"], dtype=np.float32).tolist())
             proprio_states.append(next_state.cpu().tolist())
+            if trace is not None:
+                trace["actual_states"].append(next_state.cpu().tolist())
             total_micro_steps += result.micro_steps
             final_cost = plan.cost
             success = result.success
@@ -323,7 +354,7 @@ def run_planning_episode(
             if success or terminated or truncated:
                 break
 
-    return {
+    record = {
         "seed": seed,
         "camera": "topdown",
         "cost_mode": cost,
@@ -340,6 +371,84 @@ def run_planning_episode(
         "achieved_positions": positions,
         "proprio_states": proprio_states,
     }
+    if collect_plan_traces:
+        record["goal_position"] = goal_position.cpu().tolist()
+        record["plan_traces"] = plan_traces
+    return record
+
+
+def save_plan_trace_diagnostics(record, wall_rectangles, output_dir, episode_index):
+    """Save predicted and measured state paths for every selected plan."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"episode_{episode_index:04d}_seed_{record['seed']:06d}"
+    walls = np.asarray(wall_rectangles, dtype=np.float32).reshape(-1, 4)
+    base._write_json_atomically({
+        "seed": record["seed"],
+        "goal_position": record["goal_position"],
+        "wall_rectangles": walls.tolist(),
+        "plan_traces": record["plan_traces"],
+    }, output_dir / f"{stem}_traces.json")
+
+    figure_paths = []
+    for trace in record["plan_traces"]:
+        predicted = np.asarray(trace["predicted_states"], dtype=np.float32)[:, :2]
+        actual = np.asarray(trace["actual_states"], dtype=np.float32)[:, :2]
+        predicted_path = np.concatenate((actual[:1], predicted), axis=0)
+        figure, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+        for axis in axes:
+            for wall_index, (x, y, width, height) in enumerate(walls):
+                axis.add_patch(Rectangle(
+                    (x, y), width, height,
+                    facecolor="#b98247", edgecolor="#5f3d1f", linewidth=1,
+                    label="wall" if wall_index == 0 else None,
+                ))
+            axis.plot(predicted_path[:, 0], predicted_path[:, 1], "o--",
+                      color="#6a3d9a", label="WM prediction")
+            axis.plot(actual[:, 0], actual[:, 1], "o-",
+                      color="#2ca25f", label="actual executed path")
+            for step in range(1, len(actual)):
+                axis.plot(
+                    [predicted_path[step, 0], actual[step, 0]],
+                    [predicted_path[step, 1], actual[step, 1]],
+                    color="0.6", linestyle=":", linewidth=1,
+                )
+                axis.annotate(str(step), actual[step], xytext=(5, 5),
+                              textcoords="offset points", fontsize=8)
+            axis.scatter(*actual[0], color="black", s=55, label="plan start", zorder=5)
+            axis.scatter(*record["goal_position"], marker="*", color="red",
+                         s=150, label="goal", zorder=5)
+            axis.set(xlabel="x", ylabel="y")
+            axis.set_aspect("equal", adjustable="box")
+            axis.grid(alpha=0.2)
+        axes[0].set_title("Full maze")
+        axes[0].legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3)
+        path_points = np.concatenate((predicted_path, actual), axis=0)
+        midpoint = (path_points.min(axis=0) + path_points.max(axis=0)) / 2
+        span = max(float(np.ptp(path_points, axis=0).max()) + 0.3, 0.6)
+        axes[1].set_xlim(midpoint[0] - span / 2, midpoint[0] + span / 2)
+        axes[1].set_ylim(midpoint[1] - span / 2, midpoint[1] + span / 2)
+        axes[1].set_title("Zoom around selected plan")
+        position_errors = np.linalg.norm(predicted[:len(actual) - 1] - actual[1:], axis=1)
+        error_label = (
+            f" · last executed step error {position_errors[-1]:.3f}"
+            if len(position_errors) else ""
+        )
+        figure.suptitle(
+            f"Seed {record['seed']} · plan {trace['plan_index']} "
+            f"· macro step {trace['start_macro_step']}{error_label}"
+        )
+        figure_path = output_dir / f"{stem}_plan_{trace['plan_index']:02d}.png"
+        figure.savefig(figure_path, dpi=160)
+        plt.close(figure)
+        figure_paths.append(figure_path)
+    return figure_paths
 
 
 def main(argv=None):
@@ -408,7 +517,16 @@ def main(argv=None):
                 generator=base._create_generator(device, seed),
                 frame_callback=frames.append if frames is not None else None,
                 cost=args.cost,
+                collect_plan_traces=args.plan_trace_dir is not None,
             )
+            if args.plan_trace_dir is not None:
+                record["plan_trace_plots"] = [str(path) for path in
+                    save_plan_trace_diagnostics(
+                        record,
+                        base.extract_wall_rectangles(environment),
+                        args.plan_trace_dir,
+                        episode_index,
+                    )]
             record["video_path"] = None
             if frames is not None:
                 record["video_path"] = str(base.save_episode_video(
@@ -450,6 +568,9 @@ def main(argv=None):
             "precision": precision,
             "compile": args.compile,
             "video_dir": None if args.video_dir is None else str(args.video_dir),
+            "plan_trace_dir": (
+                None if args.plan_trace_dir is None else str(args.plan_trace_dir)
+            ),
             "video_fps": args.video_fps,
         },
         "summary": summary,

@@ -180,6 +180,11 @@ class ProprioPlanningTest(unittest.TestCase):
         class TinyModel(torch.nn.Module):
             num_hist = 2
 
+            def forward(self, latents, states, actions):
+                next_states = states.clone()
+                next_states[:, -1, 0] += actions[:, -1, 0]
+                return latents, next_states
+
         def action(value):
             return torch.full((10,), value)
 
@@ -208,7 +213,9 @@ class ProprioPlanningTest(unittest.TestCase):
                     state_mean=torch.zeros(4),
                     state_std=torch.ones(4),
                     cost="position",
+                    collect_plan_traces=True,
                 )
+                walls = plan_pointmaze.extract_wall_rectangles(environment)
         finally:
             environment.close()
 
@@ -221,6 +228,27 @@ class ProprioPlanningTest(unittest.TestCase):
         self.assertEqual(len(record["proprio_states"]), 4)
         self.assertEqual(len(record["achieved_positions"]), 4)
         self.assertEqual(record["final_planner_cost"], 2.0)
+        traces = record["plan_traces"]
+        self.assertEqual(len(traces), 2)
+        self.assertEqual([len(trace["actual_states"]) for trace in traces], [3, 2])
+        self.assertEqual([len(trace["predicted_states"]) for trace in traces], [3, 3])
+        self.assertEqual([trace["start_macro_step"] for trace in traces], [0, 2])
+        np.testing.assert_allclose(
+            np.asarray(traces[0]["predicted_states"])[:, 0]
+            - traces[0]["start_state"][0],
+            [0.1, 0.3, 0.6], atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(traces[0]["actual_states"]),
+            np.asarray(record["proprio_states"][:3]), atol=1e-6,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            paths = plan_pointmaze_proprio.save_plan_trace_diagnostics(
+                record, walls, Path(directory), episode_index=0,
+            )
+            self.assertEqual(len(paths), 2)
+            self.assertTrue(all(path.is_file() for path in paths))
+            self.assertTrue((Path(directory) / "episode_0000_seed_000000_traces.json").is_file())
 
 
 if __name__ == "__main__":

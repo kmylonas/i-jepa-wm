@@ -107,6 +107,30 @@ planning counts, use `--planning-horizon 5 --actions-per-plan 5 --population 300
 --num-elites 30 --cem-iterations 10`. The world model, objective, and CEM
 implementation still differ.
 
+To inspect a failed position-planning episode, repeat it with the same
+checkpoint, seed, and planning flags, but set `--num-episodes 1`,
+`--base-seed` to that episode's seed, and `--plan-trace-dir` to an output
+directory. For example, with the five-action configuration:
+
+```bash
+python -u -m src.mylonas_ijepa_wm.plan_pointmaze_proprio \
+  --encoder-checkpoint /path/to/ijepa_encoder.pt \
+  --world-model-checkpoint /path/to/proprio/best.pt \
+  --output /path/to/trace_episode.json \
+  --plan-trace-dir /path/to/trace_plots \
+  --cost position --num-episodes 1 --base-seed 0 \
+  --max-macro-steps 20 --planning-horizon 5 --actions-per-plan 5 \
+  --population 300 --num-elites 30 --cem-iterations 10 \
+  --candidate-batch-size 64 --device cuda --precision auto
+```
+
+Each plan's PNG shows the WM's full predicted position path and the actual
+executed path over the maze, with a zoomed view. The matching traces JSON
+stores predicted and actual `(x, y, vx, vy)` at each macro step, the chosen
+actions, and the wall rectangles. The trace adds one WM rollout per planning
+round; it does not change which plan CEM selects. The ordinary result JSON
+also includes the trace data when this flag is set.
+
 Because the planner receives true position and velocity, its success rate is
 not directly comparable to the previous vision-only setup. A comparison
 should use the same top-down episodes, encoder, planning budget, and goal
