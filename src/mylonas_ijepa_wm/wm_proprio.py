@@ -17,6 +17,38 @@ MODEL_TYPE = "proprio_v1"
 PROPRIO_FIELDS = ("x", "y", "vx", "vy")
 
 
+def read_physics_frame_skip(trajectory_dir, episode_ids):
+    """Read episode timing and reject caches that mix different dynamics."""
+    expected = None
+    for episode_id in episode_ids:
+        trajectory = torch.load(
+            Path(trajectory_dir) / f"episode_{episode_id:04d}.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+        value = int(trajectory.get("physics_frame_skip", 1))
+        if value < 1:
+            raise ValueError(f"Episode {episode_id} has invalid physics_frame_skip")
+        if expected is not None and value != expected:
+            raise ValueError(
+                f"Episode {episode_id} physics_frame_skip={value} does not "
+                f"match the rest of the cache ({expected})"
+            )
+        expected = value
+    if expected is None:
+        raise ValueError("episode_ids must not be empty")
+    return expected
+
+
+def read_checkpoint_physics_frame_skip(checkpoint_path):
+    """Read timing without constructing the model or moving it to a GPU."""
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    value = int(checkpoint.get("metadata", {}).get("physics_frame_skip", 1))
+    if value < 1:
+        raise ValueError("checkpoint physics_frame_skip must be positive")
+    return value
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Train a top-down I-JEPA world model with proprioception."
@@ -311,6 +343,8 @@ def run_epoch(
 
 def validate_checkpoint_metadata(saved, current, include_objective=True):
     wm.validate_checkpoint_metadata(saved, current, include_objective)
+    if int(saved.get("physics_frame_skip", 1)) != current["physics_frame_skip"]:
+        raise ValueError("Current physics_frame_skip does not match the checkpoint")
     for key in ("model_type", "camera", "proprio_fields", "proprio_loss_weight"):
         if saved.get(key) != current.get(key):
             raise ValueError(f"Current {key} does not match the checkpoint")
@@ -358,6 +392,9 @@ def main(argv=None):
         args.val_episodes,
         args.test_episodes,
         args.seed,
+    )
+    physics_frame_skip = read_physics_frame_skip(
+        args.trajectory_dir, [*train_ids, *val_ids, *test_ids]
     )
     action_mean = action_std = None
     if args.normalize_actions:
@@ -415,6 +452,7 @@ def main(argv=None):
     metadata = dict(
         model_type=MODEL_TYPE,
         camera="topdown",
+        physics_frame_skip=physics_frame_skip,
         proprio_fields=PROPRIO_FIELDS,
         model_configuration=model_configuration,
         train_ids=train_ids,

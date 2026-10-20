@@ -829,9 +829,13 @@ def run_planning_episode(
     }
 
 
-def create_environment(environment_id, max_micro_steps, camera="topdown"):
+def create_environment(
+    environment_id, max_micro_steps, camera="topdown", physics_frame_skip=1
+):
     if camera not in {"topdown", "angled"}:
         raise ValueError(f"unknown camera: {camera}")
+    if physics_frame_skip < 1:
+        raise ValueError("physics_frame_skip must be positive")
 
     import gymnasium as gym
     import gymnasium_robotics
@@ -846,6 +850,7 @@ def create_environment(environment_id, max_micro_steps, camera="topdown"):
         reset_target=True,
         max_episode_steps=max_micro_steps,
     )
+    environment.unwrapped.point_env.frame_skip = physics_frame_skip
     if camera == "topdown":
         camera_config = {
             "distance": 7.0,

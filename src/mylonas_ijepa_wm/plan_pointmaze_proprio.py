@@ -483,13 +483,22 @@ def main(argv=None):
         or configuration["proprio_dim"] != 4
     ):
         raise ValueError("checkpoint geometry is incompatible with PointMaze planning")
+    physics_frame_skip = int(metadata.get("physics_frame_skip", 1))
+    if physics_frame_skip < 1:
+        raise ValueError("checkpoint physics_frame_skip must be positive")
     model = wm.compile_model(model, enabled=args.compile)
     encoder = base.load_frozen_ijepa_encoder(args.encoder_checkpoint, device)
     environment = base.create_environment(
-        args.environment_id, args.max_macro_steps * 5, camera="topdown"
+        args.environment_id,
+        args.max_macro_steps * 5,
+        camera="topdown",
+        physics_frame_skip=physics_frame_skip,
     )
     records = []
-    print(f"Device: {device}, precision: {precision}, camera: topdown")
+    print(
+        f"Device: {device}, precision: {precision}, camera: topdown, "
+        f"physics frame skip: {physics_frame_skip}"
+    )
     print(f"World-model epoch: {epoch + 1}, cost: {args.cost}")
     try:
         for episode_index in range(args.num_episodes):
@@ -552,6 +561,7 @@ def main(argv=None):
             "world_model_checkpoint": str(args.world_model_checkpoint),
             "world_model_epoch": epoch,
             "camera": "topdown",
+            "physics_frame_skip": physics_frame_skip,
             "cost": args.cost,
             "environment_id": args.environment_id,
             "num_episodes": args.num_episodes,

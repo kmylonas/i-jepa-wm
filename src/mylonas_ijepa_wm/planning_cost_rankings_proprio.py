@@ -242,9 +242,15 @@ def main(argv=None):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     frames_dir = args.output_dir / "frames"
     frames_dir.mkdir(exist_ok=True)
+    physics_frame_skip = wm_proprio.read_checkpoint_physics_frame_skip(
+        args.world_model_checkpoint
+    )
 
     environment = base.create_environment(
-        args.environment_id, max_micro_steps=100, camera="topdown"
+        args.environment_id,
+        max_micro_steps=100,
+        camera="topdown",
+        physics_frame_skip=physics_frame_skip,
     )
     try:
         pool, selected = select_cases(
@@ -355,6 +361,7 @@ def main(argv=None):
             "world_model_epoch": epoch,
             "encoder_checkpoint": str(args.encoder_checkpoint),
             "environment_id": args.environment_id,
+            "physics_frame_skip": physics_frame_skip,
             "base_seed": args.base_seed,
             "seed_pool": args.seed_pool,
             "num_far": args.num_far,

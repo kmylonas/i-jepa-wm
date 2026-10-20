@@ -23,6 +23,22 @@ def count_green_ball_pixels(frame):
 
 
 class TopDownPlanningCameraTest(unittest.TestCase):
+    def test_planning_environment_uses_requested_physics_frame_skip(self):
+        environment = plan_pointmaze.create_environment(
+            environment_id="PointMaze_UMaze-v3",
+            max_micro_steps=10,
+            physics_frame_skip=5,
+        )
+        try:
+            environment.reset(seed=0)
+            point_env = environment.unwrapped.point_env
+            start_time = float(point_env.data.time)
+            environment.step(np.zeros(2, dtype=np.float32))
+            self.assertEqual(point_env.frame_skip, 5)
+            self.assertAlmostEqual(float(point_env.data.time) - start_time, 0.05)
+        finally:
+            environment.close()
+
     def test_angled_camera_matches_environment_default(self):
         import gymnasium as gym
         import gymnasium_robotics

@@ -52,6 +52,7 @@ class ProprioPlanningTest(unittest.TestCase):
                     "state_std": torch.ones(4),
                     "action_mean": None,
                     "action_std": None,
+                    "physics_frame_skip": 5,
                 },
             }, checkpoint)
 
@@ -70,6 +71,7 @@ class ProprioPlanningTest(unittest.TestCase):
 
                     result = json.loads(output.read_text())
                     self.assertEqual(result["configuration"]["camera"], "topdown")
+                    self.assertEqual(result["configuration"]["physics_frame_skip"], 5)
                     self.assertEqual(result["configuration"]["cost"], cost)
                     self.assertEqual(result["episodes"][0]["cost_mode"], cost)
                     self.assertEqual(len(result["episodes"]), 1)

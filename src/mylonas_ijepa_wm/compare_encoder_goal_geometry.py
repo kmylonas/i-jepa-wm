@@ -141,6 +141,7 @@ def main(argv=None):
     environment = base.create_environment(
         source["configuration"]["environment_id"],
         max_micro_steps=100, camera="topdown",
+        physics_frame_skip=source["configuration"].get("physics_frame_skip", 1),
     )
     rows_by_seed = {}
     summaries = {}

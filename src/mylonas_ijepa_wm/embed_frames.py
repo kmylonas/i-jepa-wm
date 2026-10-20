@@ -122,6 +122,13 @@ def process_episode(
 
         # Episode metadata
         "desired_goal": episode["desired_goal"].cpu(),
+        "physics_frame_skip": int(episode.get("physics_frame_skip", 1)),
+        "control_dt_seconds": float(
+            episode.get(
+                "control_dt_seconds",
+                0.01 * int(episode.get("physics_frame_skip", 1)),
+            )
+        ),
     }
 
     

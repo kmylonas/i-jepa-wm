@@ -6,11 +6,70 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.mylonas_ijepa_wm import wm_proprio
+from src.mylonas_ijepa_wm import embed_frames, wm_proprio
 from src.mylonas_ijepa_wm.proprio_vit import ProprioViT
 
 
+class EmbedFramesTimingTest(unittest.TestCase):
+    def test_preserves_physics_timing_and_action_alignment(self):
+        class TinyEncoder(torch.nn.Module):
+            def forward(self, images):
+                return torch.zeros((len(images), 1, 1), device=images.device)
+
+        episode = {
+            "frames": torch.zeros((101, 224, 224, 3), dtype=torch.uint8),
+            "actions": torch.arange(200, dtype=torch.float32).reshape(100, 2),
+            "states": torch.arange(404, dtype=torch.float32).reshape(101, 4),
+            "desired_goal": torch.zeros(2),
+            "physics_frame_skip": 5,
+            "control_dt_seconds": 0.05,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            embed_frames.process_episode(
+                episode=episode,
+                encoder=TinyEncoder(),
+                device=torch.device("cpu"),
+                episode_name="episode_0000",
+                output_directory=output,
+            )
+            trajectory = torch.load(
+                output / "trajectories" / "episode_0000.pt",
+                map_location="cpu",
+                weights_only=True,
+            )
+            latents = np.load(output / "latents" / "episode_0000.npy")
+
+            self.assertEqual(trajectory["physics_frame_skip"], 5)
+            self.assertAlmostEqual(trajectory["control_dt_seconds"], 0.05)
+            self.assertEqual(latents.shape[0], 21)
+            torch.testing.assert_close(trajectory["sampled_states"], episode["states"][::5])
+            torch.testing.assert_close(
+                trajectory["macro_actions"][0], episode["actions"][:5].flatten()
+            )
+
+
 class ProprioDatasetTest(unittest.TestCase):
+    def test_checkpoint_timing_can_be_read_before_loading_model(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkpoint = Path(temporary_directory) / "best.pt"
+            torch.save({"metadata": {"physics_frame_skip": 5}}, checkpoint)
+            self.assertEqual(
+                wm_proprio.read_checkpoint_physics_frame_skip(checkpoint), 5
+            )
+
+    def test_training_rejects_mixed_physics_timing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            trajectory_dir = Path(temporary_directory)
+            torch.save({"physics_frame_skip": 5}, trajectory_dir / "episode_0000.pt")
+            torch.save({"physics_frame_skip": 5}, trajectory_dir / "episode_0001.pt")
+            self.assertEqual(
+                wm_proprio.read_physics_frame_skip(trajectory_dir, [0, 1]), 5
+            )
+            torch.save({"physics_frame_skip": 1}, trajectory_dir / "episode_0001.pt")
+            with self.assertRaisesRegex(ValueError, "physics_frame_skip"):
+                wm_proprio.read_physics_frame_skip(trajectory_dir, [0, 1])
+
     def test_sample_aligns_latents_states_and_actions(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
