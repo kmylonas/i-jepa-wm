@@ -37,3 +37,6 @@ src/mylonas_ijepa_wm/proprio
 !tests/test_mylonas_ijepa_wm_proprio_planning.py
 !tests/test_mylonas_ijepa_embedding_similarity.py
 !tests/test_mylonas_ijepa_goal_latent_cost.py
+!tests/test_mylonas_ijepa_planning_cost_rankings_proprio.py
+!tests/test_mylonas_ijepa_validate_planning_costs_proprio.py
+!tests/test_mylonas_ijepa_compare_encoder_goal_geometry.py

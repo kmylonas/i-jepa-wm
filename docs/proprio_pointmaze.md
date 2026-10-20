@@ -84,7 +84,8 @@ python -u -m src.mylonas_ijepa_wm.plan_pointmaze_proprio \
   --cost latent \
   --video-dir src/mylonas_ijepa_wm/topdown/world_models/proprio_v1/videos \
   --num-episodes 20 --base-seed 0 --max-macro-steps 20 \
-  --planning-horizon 3 --population 256 --num-elites 32 \
+  --planning-horizon 3 --actions-per-plan 1 \
+  --population 256 --num-elites 32 \
   --cem-iterations 5 --candidate-batch-size 64 \
   --device cuda --precision auto --compile
 ```
@@ -97,12 +98,116 @@ scores its Euclidean distance to the actual goal position. The camera remains
 top-down, and no probe checkpoint is required. If `--output` is omitted, the
 default filename includes the selected cost. Omit `--video-dir` if videos are
 unnecessary. The JSON records the cost mode, success, actions, achieved
-positions, and the measured proprioceptive states at each replan.
+positions, and the measured proprioceptive states after each executed macro action.
+`--actions-per-plan` controls how many actions from each planned sequence are
+executed before replanning. It defaults to 1 and cannot exceed
+`--planning-horizon`; `--max-macro-steps` remains the total number of executed
+macro actions allowed per episode. To match the published DINO-WM PointMaze
+planning counts, use `--planning-horizon 5 --actions-per-plan 5 --population 300
+--num-elites 30 --cem-iterations 10`. The world model, objective, and CEM
+implementation still differ.
 
 Because the planner receives true position and velocity, its success rate is
 not directly comparable to the previous vision-only setup. A comparison
 should use the same top-down episodes, encoder, planning budget, and goal
 cost, with proprioception as the only changed input.
+
+## Compare which plans the two goal costs prefer
+
+This small diagnostic uses the same proprioceptive planner checkpoint and
+encoder as planning. It selects the five farthest and two nearest start-goal
+pairs among seeds 0–19, draws 256 candidate action sequences per pair from
+the first CEM sampling distribution, and predicts each sequence once. Both
+costs score the same terminal predictions. It does not execute candidates in
+the simulator or need the cached training episodes.
+
+```bash
+python -u -m src.mylonas_ijepa_wm.planning_cost_rankings_proprio \
+  --world-model-checkpoint src/mylonas_ijepa_wm/proprio/world_model_runs/full_default_v1_k3/best.pt \
+  --encoder-checkpoint src/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar \
+  --output-dir src/mylonas_ijepa_wm/debug/planning_cost_rankings_proprio \
+  --device mps
+```
+
+Use `--device cuda` on Colab. The defaults match a three-step planning
+horizon and 32 CEM elites; `--population`, `--num-elites`,
+`--candidate-batch-size`, and the case counts can be changed. The saved
+`rankings.png` plots predicted position distance against predicted visual
+latent MSE separately for each start and goal. `summary.json` reports their
+within-case Spearman rank correlation and how many of the top 32 candidates
+both costs select (four overlaps are expected from unrelated random rankings
+with 256 candidates). `candidates.csv` and the per-seed `.npz` files retain
+the individual scores, predicted positions, and sampled actions. The saved
+current and goal PNGs verify the rendered top-down views.
+
+Agreement between these scores measures consistency within the world model.
+It does not establish which candidate action sequences would truly move the
+ball closer to the goal when executed in the simulator.
+
+### Replay selected plans to check real outcomes
+
+Replay two far starts where the costs disagree (seeds 13 and 18) and one
+where they agree more (seed 19). For each start, this takes the 16 lowest
+predicted visual costs, the 16 lowest predicted position costs, and 16 random
+candidates outside those groups. Overlapping elites are replayed once. Each
+candidate runs from the same seeded reset for the full three-macro-action
+horizon, even if the ball reaches the goal early. The script checks the saved
+start, goal, and camera frames against fresh simulator renders.
+
+```bash
+python -u -m src.mylonas_ijepa_wm.validate_planning_costs_proprio \
+  --input-dir src/mylonas_ijepa_wm/debug/planning_cost_rankings_proprio \
+  --output-dir src/mylonas_ijepa_wm/debug/planning_cost_rankings_proprio/replay_validation \
+  --seeds 13 18 19 --top-per-cost 16 --random-count 16 \
+  --batch-size 4 --device mps
+```
+
+This needs the original ranking output and the same I-JEPA encoder checkpoint,
+but not the world-model checkpoint or episode cache. It saves
+`replayed_candidates.csv` with the actual terminal position, actual distance
+to goal, I-JEPA latent MSE of the actual terminal frame, and the two saved
+predicted costs. `summary.json` reports rank correlations separately for the
+true visual cost, predicted visual cost, and predicted position cost;
+`replay_cost_diagnostics.png` plots these relationships. `sample_frames`
+contains terminal renders of the best candidate under each cost and one
+random candidate per start.
+
+The selected candidates deliberately emphasize elites, so their correlations
+do not estimate performance over all possible actions. The 16 random controls
+also exclude those elites. This is a local, exploratory test of cost rankings
+among reachable outcomes at a fixed start and goal. It differs from the wider
+grid of valid positions in the goal-latent-cost experiment below.
+
+### Compare I-JEPA and DINOv2 on the same real endpoints
+
+The saved first-iteration CEM candidate actions were sampled before either
+cost was evaluated. This comparison chooses 64 actions uniformly from each of
+seeds 13, 18, and 19, replays them, and encodes each actual terminal frame and
+its fixed goal frame with both frozen encoders. Both use the same top-down
+224-pixel RGB images with the goal marker hidden. The DINOv2 backbone is the
+plain ViT-S/14 used by DINO-WM; its normalized patch tokens have shape
+`[256, 384]`. The I-JEPA tokens have shape `[256, 1280]`.
+
+```bash
+python -u -m src.mylonas_ijepa_wm.compare_encoder_goal_geometry \
+  --input-dir src/mylonas_ijepa_wm/debug/planning_cost_rankings_proprio \
+  --dinov2-checkpoint src/checkpoints/dinov2_vits14_pretrain.pth \
+  --seeds 13 18 19 --candidates-per-seed 64 \
+  --batch-size 4 --device mps
+```
+
+The first run may fetch DINOv2's model code through PyTorch Hub; it loads
+the provided weights locally. Results go to `encoder_goal_geometry/` inside
+the input directory: `samples.csv`, `summary.json`, and `comparison.png`.
+Compare Spearman rank correlations, not raw MSE magnitudes, because the
+encoders have different feature scales. The I-JEPA and DINOv2 correlations
+were respectively −0.55 and −0.04 for seed 13, 0.10 and 0.59 for seed 18,
+and −0.33 and −0.32 for seed 19. Thus DINOv2 improves local ranking in two
+starts but still fails to rank seed 19 by goal distance. These starts were
+selected by the preceding diagnostic, so the result is exploratory. The
+I-JEPA-trained world model does not participate in either measured cost;
+testing DINOv2 world-model predictions would require retraining a model on
+DINOv2 latents.
 
 ## Check whether the latent goal cost tracks ball distance
 

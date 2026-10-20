@@ -9,6 +9,7 @@ import torch
 
 from src.mylonas_ijepa_wm import plan_pointmaze
 from src.mylonas_ijepa_wm import plan_pointmaze_proprio
+from src.mylonas_ijepa_wm.planning import CEMResult
 from src.mylonas_ijepa_wm.proprio_vit import ProprioViT
 
 
@@ -170,6 +171,56 @@ class ProprioPlanningTest(unittest.TestCase):
             np.asarray(record["achieved_positions"]),
             atol=1e-6,
         )
+
+    def test_episode_executes_multiple_actions_before_replanning_with_total_step_limit(self):
+        class TinyEncoder(torch.nn.Module):
+            def forward(self, images):
+                return torch.zeros(len(images), 2, 3, device=images.device)
+
+        class TinyModel(torch.nn.Module):
+            num_hist = 2
+
+        def action(value):
+            return torch.full((10,), value)
+
+        plans = [
+            CEMResult(torch.stack([action(0.1), action(0.2), action(0.3)]), 1.0),
+            CEMResult(torch.stack([action(0.4), action(0.5), action(0.6)]), 2.0),
+        ]
+        environment = plan_pointmaze.create_environment(
+            "PointMaze_UMaze-v3", max_micro_steps=15, camera="topdown"
+        )
+        try:
+            with patch.object(plan_pointmaze_proprio, "plan_action", side_effect=plans) as planner:
+                record = plan_pointmaze_proprio.run_planning_episode(
+                    env=environment,
+                    encoder=TinyEncoder(),
+                    model=TinyModel(),
+                    device=torch.device("cpu"),
+                    seed=0,
+                    max_macro_steps=3,
+                    planning_horizon=3,
+                    actions_per_plan=2,
+                    population=2,
+                    num_elites=1,
+                    num_iterations=1,
+                    candidate_batch_size=2,
+                    state_mean=torch.zeros(4),
+                    state_std=torch.ones(4),
+                    cost="position",
+                )
+        finally:
+            environment.close()
+
+        self.assertEqual(planner.call_count, 2)
+        self.assertEqual(record["macro_steps"], 3)
+        self.assertEqual(record["micro_steps"], 15)
+        np.testing.assert_allclose(
+            np.asarray(record["macro_actions"])[:, 0], [0.1, 0.2, 0.4]
+        )
+        self.assertEqual(len(record["proprio_states"]), 4)
+        self.assertEqual(len(record["achieved_positions"]), 4)
+        self.assertEqual(record["final_planner_cost"], 2.0)
 
 
 if __name__ == "__main__":

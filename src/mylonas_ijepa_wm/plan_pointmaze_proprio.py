@@ -40,6 +40,7 @@ def parse_args(argv=None):
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument("--max-macro-steps", type=int, default=20)
     parser.add_argument("--planning-horizon", type=int, default=3)
+    parser.add_argument("--actions-per-plan", type=int, default=1)
     parser.add_argument("--population", type=int, default=256)
     parser.add_argument("--num-elites", type=int, default=32)
     parser.add_argument("--cem-iterations", type=int, default=5)
@@ -217,6 +218,7 @@ def run_planning_episode(
     candidate_batch_size,
     state_mean,
     state_std,
+    actions_per_plan=1,
     action_mean=None,
     action_std=None,
     precision="fp32",
@@ -225,6 +227,8 @@ def run_planning_episode(
     frame_callback=None,
     cost="latent",
 ):
+    if not 1 <= actions_per_plan <= planning_horizon:
+        raise ValueError("actions_per_plan must be between 1 and planning_horizon")
     observation, reset_info = env.reset(seed=seed)
     base.hide_goal_marker(env)
     initial_latent = base.encode_frame(encoder, base.validate_frame(env.render()), device, precision)
@@ -260,9 +264,7 @@ def run_planning_episode(
     final_cost = None
     initial_distance = base._goal_distance(observation)
 
-    for _ in range(max_macro_steps):
-        if success or terminated or truncated:
-            break
+    while len(macro_actions) < max_macro_steps and not (success or terminated or truncated):
         plan = plan_action(
             model=model,
             latent_history=latent_history,
@@ -287,35 +289,39 @@ def run_planning_episode(
             state_mean=state_mean,
             state_std=state_std,
         )
-        macro_action = plan.action_sequence[0].detach().cpu()
-        result = base.execute_macro_action(
-            env, macro_action, frame_callback=frame_callback
-        )
-        observation = result.observation
-        next_state = torch.as_tensor(
-            observation["observation"], device=device, dtype=torch.float32
-        )
-        next_latent = base.encode_frame(
-            encoder, base.validate_frame(env.render()), device, precision
-        )
-        latent_history = torch.cat(
-            [latent_history[1:], next_latent.unsqueeze(0)], dim=0
-        )
-        state_history = torch.cat(
-            [state_history[1:], ((next_state - state_mean) / state_std).unsqueeze(0)],
-            dim=0,
-        )
-        action_history = torch.cat(
-            [action_history[1:], macro_action.to(device).unsqueeze(0)], dim=0
-        )
-        macro_actions.append(macro_action.tolist())
-        positions.append(np.asarray(observation["achieved_goal"], dtype=np.float32).tolist())
-        proprio_states.append(next_state.cpu().tolist())
-        total_micro_steps += result.micro_steps
-        final_cost = plan.cost
-        success = result.success
-        terminated = result.terminated
-        truncated = result.truncated
+        num_actions = min(actions_per_plan, max_macro_steps - len(macro_actions))
+        for macro_action in plan.action_sequence[:num_actions]:
+            macro_action = macro_action.detach().cpu()
+            result = base.execute_macro_action(
+                env, macro_action, frame_callback=frame_callback
+            )
+            observation = result.observation
+            next_state = torch.as_tensor(
+                observation["observation"], device=device, dtype=torch.float32
+            )
+            next_latent = base.encode_frame(
+                encoder, base.validate_frame(env.render()), device, precision
+            )
+            latent_history = torch.cat(
+                [latent_history[1:], next_latent.unsqueeze(0)], dim=0
+            )
+            state_history = torch.cat(
+                [state_history[1:], ((next_state - state_mean) / state_std).unsqueeze(0)],
+                dim=0,
+            )
+            action_history = torch.cat(
+                [action_history[1:], macro_action.to(device).unsqueeze(0)], dim=0
+            )
+            macro_actions.append(macro_action.tolist())
+            positions.append(np.asarray(observation["achieved_goal"], dtype=np.float32).tolist())
+            proprio_states.append(next_state.cpu().tolist())
+            total_micro_steps += result.micro_steps
+            final_cost = plan.cost
+            success = result.success
+            terminated = result.terminated
+            truncated = result.truncated
+            if success or terminated or truncated:
+                break
 
     return {
         "seed": seed,
@@ -344,13 +350,15 @@ def main(argv=None):
         if not getattr(args, name).is_file():
             raise FileNotFoundError(getattr(args, name))
     for name in (
-        "num_episodes", "max_macro_steps", "planning_horizon", "population",
+        "num_episodes", "max_macro_steps", "planning_horizon", "actions_per_plan", "population",
         "num_elites", "cem_iterations", "candidate_batch_size", "video_fps",
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"{name} must be positive")
     if args.num_elites > args.population or args.min_std <= 0:
         raise ValueError("invalid CEM elite count or minimum standard deviation")
+    if args.actions_per_plan > args.planning_horizon:
+        raise ValueError("actions_per_plan cannot exceed planning_horizon")
     device = wm.resolve_device(args.device)
     precision = wm.resolve_precision(args.precision, device)
     if device.type == "cuda":
@@ -386,6 +394,7 @@ def main(argv=None):
                 seed=seed,
                 max_macro_steps=args.max_macro_steps,
                 planning_horizon=args.planning_horizon,
+                actions_per_plan=args.actions_per_plan,
                 population=args.population,
                 num_elites=args.num_elites,
                 num_iterations=args.cem_iterations,
@@ -431,6 +440,7 @@ def main(argv=None):
             "base_seed": args.base_seed,
             "max_macro_steps": args.max_macro_steps,
             "planning_horizon": args.planning_horizon,
+            "actions_per_plan": args.actions_per_plan,
             "population": args.population,
             "num_elites": args.num_elites,
             "cem_iterations": args.cem_iterations,
