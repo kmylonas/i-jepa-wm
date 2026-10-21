@@ -110,6 +110,36 @@ class DataLoaderWorkerTest(unittest.TestCase):
         self.assertEqual(num_workers, 2)
 
 
+class PhysicsTimingTest(unittest.TestCase):
+    def test_reads_shared_physics_skip_and_rejects_mixed_episodes(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            torch.save({"physics_frame_skip": 5}, directory / "episode_0000.pt")
+            torch.save({"physics_frame_skip": 5}, directory / "episode_0001.pt")
+
+            self.assertEqual(wm.read_physics_frame_skip(directory, [0, 1]), 5)
+
+            torch.save({"physics_frame_skip": 1}, directory / "episode_0001.pt")
+            with self.assertRaisesRegex(ValueError, "physics_frame_skip"):
+                wm.read_physics_frame_skip(directory, [0, 1])
+
+    def test_finetuning_rejects_a_different_physics_skip(self):
+        saved = {
+            "model_configuration": {"num_hist": 3},
+            "train_ids": [0],
+            "val_ids": [1],
+            "test_ids": [2],
+            "normalize_actions": False,
+            "action_mean": None,
+            "action_std": None,
+            "physics_frame_skip": 5,
+        }
+        current = {**saved, "physics_frame_skip": 1}
+
+        with self.assertRaisesRegex(ValueError, "physics_frame_skip"):
+            wm.validate_finetune_metadata(saved, current)
+
+
 class PrecisionTest(unittest.TestCase):
     def test_auto_uses_bfloat16_when_cuda_supports_it(self):
         precision = wm.resolve_precision(
@@ -895,7 +925,7 @@ class CommandLineTrainingTest(unittest.TestCase):
                     np.zeros((5, 2, 3), dtype=np.float16),
                 )
                 torch.save(
-                    {"macro_actions": torch.zeros(4, 2)},
+                    {"macro_actions": torch.zeros(4, 2), "physics_frame_skip": 5},
                     trajectory_dir / f"episode_{episode_id:04d}.pt",
                 )
 
@@ -964,6 +994,7 @@ class CommandLineTrainingTest(unittest.TestCase):
                 weights_only=True,
             )
             self.assertEqual(resumed_checkpoint["epoch"], 1)
+            self.assertEqual(resumed_checkpoint["metadata"]["physics_frame_skip"], 5)
 
             finetune_output_dir = root / "run_k3"
             finetune_command = command.copy()

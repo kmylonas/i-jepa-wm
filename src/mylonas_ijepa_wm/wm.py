@@ -152,6 +152,29 @@ def compute_action_statistics(trajectory_dir, episode_ids):
     return action_mean, action_std
 
 
+def read_physics_frame_skip(trajectory_dir, episode_ids):
+    """Read episode timing and reject caches with mixed dynamics."""
+    expected = None
+    for episode_id in episode_ids:
+        trajectory = torch.load(
+            Path(trajectory_dir) / f"episode_{episode_id:04d}.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+        value = int(trajectory.get("physics_frame_skip", 1))
+        if value < 1:
+            raise ValueError(f"Episode {episode_id} has invalid physics_frame_skip")
+        if expected is not None and value != expected:
+            raise ValueError(
+                f"Episode {episode_id} physics_frame_skip={value} does not "
+                f"match the rest of the cache ({expected})"
+            )
+        expected = value
+    if expected is None:
+        raise ValueError("episode_ids must not be empty")
+    return expected
+
+
 def create_episode_splits(
     num_episodes,
     train_episodes,
@@ -541,6 +564,11 @@ def validate_checkpoint_metadata(
     if include_training_objective:
         exact_keys.append("training_objective")
 
+    if int(saved_metadata.get("physics_frame_skip", 1)) != int(
+        current_metadata.get("physics_frame_skip", 1)
+    ):
+        raise ValueError("Current physics_frame_skip does not match the checkpoint")
+
     for key in exact_keys:
         saved_value = saved_metadata.get(key)
         current_value = current_metadata.get(key)
@@ -887,6 +915,10 @@ def main(argv=None):
         seed=args.seed,
     )
 
+    physics_frame_skip = read_physics_frame_skip(
+        args.trajectory_dir, [*train_ids, *val_ids, *test_ids]
+    )
+
     action_mean = None
     action_std = None
     if args.normalize_actions:
@@ -921,6 +953,7 @@ def main(argv=None):
 
     checkpoint_metadata = {
         "model_configuration": model_configuration,
+        "physics_frame_skip": physics_frame_skip,
         "train_ids": train_ids,
         "val_ids": val_ids,
         "test_ids": test_ids,

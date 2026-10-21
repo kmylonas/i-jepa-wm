@@ -945,6 +945,26 @@ class CheckpointCompatibilityTest(unittest.TestCase):
             cost_mode="latent",
         )
 
+    def test_uses_checkpoint_physics_skip_for_planning(self):
+        self.model_metadata["physics_frame_skip"] = 5
+
+        self.assertEqual(
+            plan_pointmaze.physics_frame_skip_from_metadata(self.model_metadata),
+            5,
+        )
+
+    def test_older_checkpoint_defaults_to_original_physics_timing(self):
+        self.assertEqual(
+            plan_pointmaze.physics_frame_skip_from_metadata(self.model_metadata),
+            1,
+        )
+
+    def test_rejects_invalid_checkpoint_physics_skip(self):
+        self.model_metadata["physics_frame_skip"] = 0
+
+        with self.assertRaisesRegex(ValueError, "physics_frame_skip"):
+            plan_pointmaze.physics_frame_skip_from_metadata(self.model_metadata)
+
 
 class PlanningSummaryTest(unittest.TestCase):
     def test_summarizes_success_distance_and_steps(self):

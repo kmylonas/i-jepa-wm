@@ -864,6 +864,14 @@ def create_environment(
     return environment
 
 
+def physics_frame_skip_from_metadata(metadata):
+    """Use the checkpoint's dynamics, with physics1 for older checkpoints."""
+    value = int(metadata.get("physics_frame_skip", 1))
+    if value < 1:
+        raise ValueError("checkpoint physics_frame_skip must be positive")
+    return value
+
+
 def _create_generator(device, seed):
     if device.type in {"cpu", "cuda"}:
         return torch.Generator(device=device).manual_seed(seed)
@@ -1155,6 +1163,7 @@ def main(argv=None):
         args.world_model_checkpoint,
         device,
     )
+    physics_frame_skip = physics_frame_skip_from_metadata(model_metadata)
 
     position_probe = None
     probe_metadata = None
@@ -1198,6 +1207,7 @@ def main(argv=None):
         print(f"Position-probe epoch: {probe_epoch + 1}")
     print(f"Cost: {args.cost}")
     print(f"Camera: {args.camera}")
+    print(f"Physics frame skip: {physics_frame_skip}")
     print(
         f"CEM: H={args.planning_horizon}, "
         f"population={args.population}, elites={args.num_elites}, "
@@ -1208,6 +1218,7 @@ def main(argv=None):
         environment_id=args.environment_id,
         max_micro_steps=args.max_macro_steps * 5,
         camera=args.camera,
+        physics_frame_skip=physics_frame_skip,
     )
     wall_rectangles = None
     if args.failure_diagnostics_dir is not None:
@@ -1297,6 +1308,7 @@ def main(argv=None):
             ),
             "environment_id": args.environment_id,
             "camera": args.camera,
+            "physics_frame_skip": physics_frame_skip,
             "cost": args.cost,
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,
