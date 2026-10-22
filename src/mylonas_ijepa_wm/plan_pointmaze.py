@@ -125,6 +125,7 @@ def parse_args(argv=None):
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument("--max-macro-steps", type=int, default=20)
     parser.add_argument("--planning-horizon", type=int, default=3)
+    parser.add_argument("--actions-per-plan", type=int, default=1)
     parser.add_argument("--population", type=int, default=256)
     parser.add_argument("--num-elites", type=int, default=32)
     parser.add_argument("--cem-iterations", type=int, default=5)
@@ -174,6 +175,7 @@ def validate_arguments(args):
         "num_episodes",
         "max_macro_steps",
         "planning_horizon",
+        "actions_per_plan",
         "population",
         "num_elites",
         "cem_iterations",
@@ -183,6 +185,8 @@ def validate_arguments(args):
             raise ValueError(f"{name.replace('_', '-')} must be at least 1")
     if args.num_elites > args.population:
         raise ValueError("num-elites cannot exceed population")
+    if args.actions_per_plan > args.planning_horizon:
+        raise ValueError("actions-per-plan cannot exceed planning-horizon")
     if args.min_std <= 0:
         raise ValueError("min-std must be positive")
     if args.video_fps < 1:
@@ -598,6 +602,7 @@ def run_planning_episode(
     num_elites,
     num_iterations,
     candidate_batch_size,
+    actions_per_plan=1,
     position_probe=None,
     position_mean=None,
     position_std=None,
@@ -618,6 +623,8 @@ def run_planning_episode(
         raise ValueError(
             "failure diagnostics require a position probe and statistics"
         )
+    if not 1 <= actions_per_plan <= planning_horizon:
+        raise ValueError("actions_per_plan must be between 1 and planning_horizon")
 
     observation, reset_info = env.reset(seed=seed)
     hide_goal_marker(env)
@@ -680,9 +687,10 @@ def run_planning_episode(
     final_planner_cost = None
     last_plan_diagnostic = None
 
-    for macro_step_index in range(max_macro_steps):
-        if success or terminated or truncated:
-            break
+    while (
+        len(macro_actions) < max_macro_steps
+        and not (success or terminated or truncated)
+    ):
         plan = planner_fn(
             model=model,
             latent_history=latent_history,
@@ -709,7 +717,7 @@ def run_planning_episode(
         )
         if (
             collect_failure_diagnostic
-            and macro_step_index == max_macro_steps - 1
+            and max_macro_steps - len(macro_actions) <= actions_per_plan
         ):
             predicted_positions = predict_selected_plan_positions(
                 model=model,
@@ -752,54 +760,54 @@ def run_planning_episode(
                 "planner_cost": float(plan.cost),
                 "actual_position_after_first_macro": None,
             }
-        macro_action = plan.action_sequence[0].detach().cpu()
-        step_result = execute_macro_action(
-            env,
-            macro_action,
-            frame_callback=frame_callback,
-        )
-        observation = step_result.observation
-        macro_actions.append(macro_action.tolist())
-        total_micro_steps += step_result.micro_steps
-        achieved_positions.append(
-            np.asarray(
-                observation["achieved_goal"],
-                dtype=np.float32,
-            ).tolist()
-        )
-        if last_plan_diagnostic is not None:
-            last_plan_diagnostic[
-                "actual_position_after_first_macro"
-            ] = np.asarray(
-                observation["achieved_goal"],
-                dtype=np.float32,
-            ).tolist()
-        final_planner_cost = plan.cost
-
-        next_latent = encode_frame(
-            encoder,
-            validate_frame(env.render()),
-            device,
-            precision,
-        )
-        if decoded_achieved_positions is not None:
-            decoded_achieved_positions.append(
-                _decode_one_position(
-                    position_probe,
-                    next_latent,
-                    position_mean,
-                    position_std,
-                )
+        num_actions = min(actions_per_plan, max_macro_steps - len(macro_actions))
+        for selected_index, selected_action in enumerate(
+            plan.action_sequence[:num_actions]
+        ):
+            macro_action = selected_action.detach().cpu()
+            step_result = execute_macro_action(
+                env,
+                macro_action,
+                frame_callback=frame_callback,
             )
-        latent_history, action_history = update_mpc_history(
-            latent_history=latent_history,
-            action_history=action_history,
-            executed_action=macro_action,
-            next_latent=next_latent,
-        )
-        success = step_result.success
-        terminated = step_result.terminated
-        truncated = step_result.truncated
+            observation = step_result.observation
+            macro_actions.append(macro_action.tolist())
+            total_micro_steps += step_result.micro_steps
+            achieved_positions.append(
+                np.asarray(observation["achieved_goal"], dtype=np.float32).tolist()
+            )
+            if last_plan_diagnostic is not None and selected_index == 0:
+                last_plan_diagnostic["actual_position_after_first_macro"] = (
+                    achieved_positions[-1]
+                )
+            final_planner_cost = plan.cost
+
+            next_latent = encode_frame(
+                encoder,
+                validate_frame(env.render()),
+                device,
+                precision,
+            )
+            if decoded_achieved_positions is not None:
+                decoded_achieved_positions.append(
+                    _decode_one_position(
+                        position_probe,
+                        next_latent,
+                        position_mean,
+                        position_std,
+                    )
+                )
+            latent_history, action_history = update_mpc_history(
+                latent_history=latent_history,
+                action_history=action_history,
+                executed_action=macro_action,
+                next_latent=next_latent,
+            )
+            success = step_result.success
+            terminated = step_result.terminated
+            truncated = step_result.truncated
+            if success or terminated or truncated:
+                break
 
     failed_by_step_limit = (
         not success and len(macro_actions) == max_macro_steps
@@ -830,7 +838,8 @@ def run_planning_episode(
 
 
 def create_environment(
-    environment_id, max_micro_steps, camera="topdown", physics_frame_skip=1
+    environment_id, max_micro_steps, camera="topdown", physics_frame_skip=1,
+    maze_map=None,
 ):
     if camera not in {"topdown", "angled"}:
         raise ValueError(f"unknown camera: {camera}")
@@ -841,6 +850,7 @@ def create_environment(
     import gymnasium_robotics
 
     gym.register_envs(gymnasium_robotics)
+    maze_kwargs = {} if maze_map is None else {"maze_map": maze_map}
     environment = gym.make(
         environment_id,
         render_mode="rgb_array",
@@ -849,6 +859,7 @@ def create_environment(
         continuing_task=True,
         reset_target=True,
         max_episode_steps=max_micro_steps,
+        **maze_kwargs,
     )
     environment.unwrapped.point_env.frame_skip = physics_frame_skip
     if camera == "topdown":
@@ -1210,6 +1221,7 @@ def main(argv=None):
     print(f"Physics frame skip: {physics_frame_skip}")
     print(
         f"CEM: H={args.planning_horizon}, "
+        f"actions_per_plan={args.actions_per_plan}, "
         f"population={args.population}, elites={args.num_elites}, "
         f"iterations={args.cem_iterations}"
     )
@@ -1238,6 +1250,7 @@ def main(argv=None):
                 cost_mode=args.cost,
                 max_macro_steps=args.max_macro_steps,
                 planning_horizon=args.planning_horizon,
+                actions_per_plan=args.actions_per_plan,
                 population=args.population,
                 num_elites=args.num_elites,
                 num_iterations=args.cem_iterations,
@@ -1314,6 +1327,7 @@ def main(argv=None):
             "base_seed": args.base_seed,
             "max_macro_steps": args.max_macro_steps,
             "planning_horizon": args.planning_horizon,
+            "actions_per_plan": args.actions_per_plan,
             "population": args.population,
             "num_elites": args.num_elites,
             "cem_iterations": args.cem_iterations,

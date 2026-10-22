@@ -530,6 +530,95 @@ class CountingEncoder(torch.nn.Module):
 
 
 class PlanningEpisodeTest(unittest.TestCase):
+    def test_executes_multiple_selected_actions_before_replanning(self):
+        environment = FakePlanningPointEnvironment()
+        environment.goal = np.array([100.0, 0.0], dtype=np.float64)
+        encoder = CountingEncoder()
+        planner_calls = []
+        micro_actions = []
+        recorded_frames = []
+        original_step = environment.step
+
+        def recording_step(action):
+            micro_actions.append(np.asarray(action).copy())
+            return original_step(action)
+
+        environment.step = recording_step
+
+        def fake_planner(**arguments):
+            planner_calls.append(arguments)
+            actions = torch.zeros(arguments["planning_horizon"], 10)
+            start = 0.1 if len(planner_calls) == 1 else 0.4
+            for index in range(len(actions)):
+                actions[index, ::2] = start + index * 0.1
+            return planning.CEMResult(action_sequence=actions, cost=1.0)
+
+        result = plan_pointmaze.run_planning_episode(
+            env=environment,
+            encoder=encoder,
+            model=torch.nn.Identity(),
+            device=torch.device("cpu"),
+            seed=9,
+            cost_mode="latent",
+            max_macro_steps=3,
+            planning_horizon=3,
+            actions_per_plan=2,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=2,
+            frame_callback=recorded_frames.append,
+            planner_fn=fake_planner,
+        )
+
+        self.assertEqual(len(planner_calls), 2)
+        self.assertEqual(result["macro_steps"], 3)
+        self.assertEqual(result["micro_steps"], 15)
+        self.assertEqual(len(result["achieved_positions"]), 4)
+        self.assertEqual(encoder.calls, 5)
+        self.assertEqual(len(recorded_frames), 16)
+        np.testing.assert_allclose(
+            np.stack(micro_actions)[:, 0],
+            [0.1] * 5 + [0.2] * 5 + [0.4] * 5,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            planner_calls[1]["action_history"][:, 0],
+            torch.tensor([0.1, 0.2]),
+        )
+
+    def test_stops_executing_selected_plan_after_success(self):
+        environment = FakePlanningPointEnvironment()
+        planner_calls = []
+
+        def fake_planner(**arguments):
+            planner_calls.append(arguments)
+            return planning.CEMResult(
+                action_sequence=torch.zeros(arguments["planning_horizon"], 10),
+                cost=1.0,
+            )
+
+        result = plan_pointmaze.run_planning_episode(
+            env=environment,
+            encoder=CountingEncoder(),
+            model=torch.nn.Identity(),
+            device=torch.device("cpu"),
+            seed=9,
+            cost_mode="latent",
+            max_macro_steps=5,
+            planning_horizon=3,
+            actions_per_plan=3,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=2,
+            planner_fn=fake_planner,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["macro_steps"], 2)
+        self.assertEqual(len(planner_calls), 1)
+
     def test_replans_from_real_images_until_success(self):
         environment = FakePlanningPointEnvironment()
         encoder = CountingEncoder()
@@ -833,6 +922,24 @@ class FailureDiagnosticOutputTest(unittest.TestCase):
 
 
 class PlanningParserTest(unittest.TestCase):
+    def test_actions_per_plan_defaults_to_one_and_cannot_exceed_horizon(self):
+        self.assertEqual(plan_pointmaze.parse_args([]).actions_per_plan, 1)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            encoder_path = root / "encoder.pt"
+            model_path = root / "world.pt"
+            encoder_path.touch()
+            model_path.touch()
+            args = plan_pointmaze.parse_args([
+                "--cost", "latent",
+                "--encoder-checkpoint", str(encoder_path),
+                "--world-model-checkpoint", str(model_path),
+                "--planning-horizon", "3",
+                "--actions-per-plan", "4",
+            ])
+            with self.assertRaisesRegex(ValueError, "actions-per-plan"):
+                plan_pointmaze.validate_arguments(args)
+
     def test_camera_selection_defaults_to_topdown_and_accepts_angled(self):
         self.assertEqual(plan_pointmaze.parse_args([]).camera, "topdown")
         self.assertEqual(

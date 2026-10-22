@@ -40,3 +40,4 @@ src/mylonas_ijepa_wm/proprio
 !tests/test_mylonas_ijepa_planning_cost_rankings_proprio.py
 !tests/test_mylonas_ijepa_validate_planning_costs_proprio.py
 !tests/test_mylonas_ijepa_compare_encoder_goal_geometry.py
+!tests/test_mylonas_ijepa_maze_transfer_collisions.py
