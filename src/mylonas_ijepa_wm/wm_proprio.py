@@ -185,8 +185,9 @@ class ProprioWorldModelDataset(wm.WorldModelDataset):
     def __getitem__(self, index):
         sample = super().__getitem__(index)
         episode_id, start = self.samples[index]
-        end = start + self.num_hist + self.rollout_steps
-        sample["state_window"] = self.states[episode_id][start:end]
+        frame_step = self.model_frame_steps[episode_id]
+        end = start + (self.num_hist + self.rollout_steps) * frame_step
+        sample["state_window"] = self.states[episode_id][start:end:frame_step]
         return sample
 
 
@@ -465,6 +466,8 @@ def main(argv=None):
     train_dataset = ProprioWorldModelDataset(episode_ids=train_ids, **dataset_args)
     val_dataset = ProprioWorldModelDataset(episode_ids=val_ids, **dataset_args)
     test_dataset = ProprioWorldModelDataset(episode_ids=test_ids, **dataset_args)
+    if not (train_dataset.cache_timing == val_dataset.cache_timing == test_dataset.cache_timing):
+        raise ValueError("Training, validation, and test caches have different frame strides")
     loader_workers = wm.resolve_num_workers(args.num_workers, args.preload_latents)
     loader_args = dict(
         batch_size=args.batch_size,
@@ -501,6 +504,7 @@ def main(argv=None):
         environment=args.env,
         environment_config=config.portable_metadata(),
         actions_per_model_step=config.actions_per_model_step,
+        embedding_frame_stride=train_dataset.cache_timing[1],
         camera="topdown",
         physics_frame_skip=physics_frame_skip,
         proprio_fields=config.state_fields,

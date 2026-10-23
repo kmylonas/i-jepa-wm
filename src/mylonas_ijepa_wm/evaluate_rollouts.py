@@ -1,12 +1,10 @@
 """Evaluate autoregressive latent rollouts from a trained world model."""
 
 import argparse
-from collections import OrderedDict
 import json
 from pathlib import Path
 import time
 
-import numpy as np
 import torch
 
 from src.mylonas_ijepa_wm.position_probe import (
@@ -21,6 +19,7 @@ from src.mylonas_ijepa_wm.wm import (
     compile_model,
     resolve_device,
     resolve_precision,
+    WorldModelDataset,
 )
 
 
@@ -85,7 +84,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-class RolloutEvaluationDataset(torch.utils.data.Dataset):
+class RolloutEvaluationDataset(WorldModelDataset):
     def __init__(
         self,
         latent_dir,
@@ -97,111 +96,45 @@ class RolloutEvaluationDataset(torch.utils.data.Dataset):
         action_std=None,
         episode_cache_size=8,
     ):
-        self.latent_dir = Path(latent_dir)
-        self.trajectory_dir = Path(trajectory_dir)
-        self.num_hist = num_hist
+        super().__init__(
+            latent_dir=latent_dir,
+            trajectory_dir=trajectory_dir,
+            episode_ids=episode_ids,
+            num_hist=num_hist,
+            action_mean=action_mean,
+            action_std=action_std,
+            episode_cache_size=episode_cache_size,
+            rollout_steps=horizon,
+        )
         self.horizon = horizon
-        self.action_mean = action_mean
-        self.action_std = action_std
-        self.episode_cache_size = episode_cache_size
-
-        if num_hist < 1:
-            raise ValueError("num_hist must be at least 1")
-        if horizon < 1:
-            raise ValueError("horizon must be at least 1")
-        if episode_cache_size < 1:
-            raise ValueError("episode_cache_size must be at least 1")
-        if (action_mean is None) != (action_std is None):
-            raise ValueError(
-                "action_mean and action_std must either both be set or both be None"
-            )
-
-        self.samples = []
-        self.actions = {}
         self.positions = {}
-        self._latent_cache = OrderedDict()
-        sequence_length = num_hist + horizon
-
         for episode_id in episode_ids:
-            latent_path = self._latent_path(episode_id)
-            latents = np.load(
-                latent_path,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-            num_frames = len(latents)
-
             trajectory = torch.load(
-                self._trajectory_path(episode_id),
+                self.trajectory_dir / f"episode_{episode_id:04d}.pt",
                 map_location="cpu",
                 weights_only=True,
             )
-            actions = trajectory["macro_actions"].float()
             positions = trajectory["sampled_states"][:, :2].float()
-
-            if len(actions) < num_frames - 1:
-                raise ValueError(
-                    f"Episode {episode_id} has {num_frames} latent frames "
-                    f"but only {len(actions)} macro actions"
-                )
+            num_frames = len(self.load_latents(episode_id))
             if len(positions) != num_frames:
                 raise ValueError(
                     f"Episode {episode_id} has {num_frames} latent frames "
                     f"but {len(positions)} sampled states"
                 )
 
-            self.actions[episode_id] = actions
             self.positions[episode_id] = positions
-            for start in range(num_frames - sequence_length + 1):
-                self.samples.append((episode_id, start))
-
-    def _latent_path(self, episode_id):
-        return self.latent_dir / f"episode_{episode_id:04d}.npy"
-
-    def _trajectory_path(self, episode_id):
-        return self.trajectory_dir / f"episode_{episode_id:04d}.pt"
-
-    def __len__(self):
-        return len(self.samples)
-
-    def load_latents(self, episode_id):
-        if episode_id in self._latent_cache:
-            self._latent_cache.move_to_end(episode_id)
-            return self._latent_cache[episode_id]
-
-        latents = np.load(
-            self._latent_path(episode_id),
-            mmap_mode="r",
-            allow_pickle=False,
-        )
-        self._latent_cache[episode_id] = latents
-
-        if len(self._latent_cache) > self.episode_cache_size:
-            self._latent_cache.popitem(last=False)
-
-        return latents
 
     def __getitem__(self, index):
         episode_id, start = self.samples[index]
-        sequence_end = start + self.num_hist + self.horizon
-        action_end = sequence_end - 1
-
-        latent_sequence = np.array(
-            self.load_latents(episode_id)[start:sequence_end],
-            copy=True,
-        )
-        actions = self.actions[episode_id][start:action_end]
-
-        if self.action_mean is not None:
-            actions = (
-                actions - self.action_mean
-            ) / self.action_std
+        sample = super().__getitem__(index)
+        frame_step = self.model_frame_steps[episode_id]
+        sequence_end = start + (self.num_hist + self.horizon) * frame_step
 
         return {
-            "latent_sequence": torch.from_numpy(latent_sequence),
-            "actions": actions,
+            "latent_sequence": sample["latent_window"],
+            "actions": sample["actions"],
             "positions": self.positions[episode_id][
-                start:sequence_end
+                start:sequence_end:frame_step
             ],
             "episode_id": episode_id,
             "start": start,

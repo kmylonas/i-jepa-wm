@@ -25,6 +25,7 @@ src/mylonas_ijepa_wm/angled/
 src/mylonas_ijepa_wm/topdown/
 src/mylonas_ijepa_wm/debug
 src/mylonas_ijepa_wm/proprio
+src/mylonas_ijepa_wm/wall
 
 # World-model tests
 !tests/test_mylonas_ijepa_wm_training.py

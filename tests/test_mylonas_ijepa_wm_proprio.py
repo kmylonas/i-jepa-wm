@@ -6,11 +6,65 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.mylonas_ijepa_wm import embed_frames, wm_proprio
+from src.mylonas_ijepa_wm import embed_frames, wm, wm_proprio
 from src.mylonas_ijepa_wm.proprio_vit import ProprioViT
 
 
 class EmbedFramesTimingTest(unittest.TestCase):
+    def test_dense_embeddings_support_offset_training_windows(self):
+        class TinyEncoder(torch.nn.Module):
+            def forward(self, images):
+                return images[:, :1, :1, :1].reshape(-1, 1, 1)
+
+        frames = torch.arange(16, dtype=torch.uint8).view(16, 1, 1, 1).expand(16, 224, 224, 3)
+        episode = {
+            "frames": frames,
+            "actions": torch.arange(30, dtype=torch.float32).reshape(15, 2),
+            "states": torch.arange(64, dtype=torch.float32).reshape(16, 4),
+            "desired_goal": torch.zeros(2),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            embed_frames.process_episode(
+                episode, TinyEncoder(), torch.device("cpu"), "episode_0000", root,
+                embedding_frame_stride=1,
+            )
+            latents = np.load(root / "latents" / "episode_0000.npy")
+            trajectory = torch.load(root / "trajectories" / "episode_0000.pt", weights_only=True)
+            self.assertEqual(len(latents), 16)
+            self.assertEqual(trajectory["embedding_frame_stride"], 1)
+            torch.testing.assert_close(trajectory["frame_indices"], torch.arange(16))
+            torch.testing.assert_close(trajectory["sampled_states"], episode["states"])
+
+            dataset = wm_proprio.ProprioWorldModelDataset(
+                root / "latents", root / "trajectories", [0], num_hist=2,
+                rollout_steps=1, state_dim=4,
+            )
+            self.assertEqual(len(dataset), 6)
+            sample = dataset[1]
+            np.testing.assert_array_equal(sample["latent_window"].numpy(), latents[[1, 6, 11]])
+            torch.testing.assert_close(sample["state_window"], episode["states"][[1, 6, 11]])
+            torch.testing.assert_close(
+                sample["actions"],
+                torch.stack((episode["actions"][1:6].flatten(), episode["actions"][6:11].flatten())),
+            )
+
+            visual_dataset = wm.WorldModelDataset(root / "latents", root / "trajectories", [0], num_hist=2)
+            torch.testing.assert_close(visual_dataset[1]["actions"], sample["actions"])
+
+            multistep = wm_proprio.ProprioWorldModelDataset(
+                root / "latents", root / "trajectories", [0], num_hist=2,
+                rollout_steps=2, state_dim=4,
+            )
+            self.assertEqual(len(multistep), 1)
+            torch.testing.assert_close(multistep[0]["state_window"], episode["states"][[0, 5, 10, 15]])
+            torch.testing.assert_close(multistep[0]["actions"][2], episode["actions"][10:15].flatten())
+
+            expected_groups = torch.stack([episode["actions"][start:start + 5].flatten() for start in range(11)])
+            mean, std = wm.compute_action_statistics(root / "trajectories", [0])
+            torch.testing.assert_close(mean, expected_groups.mean(dim=0))
+            torch.testing.assert_close(std, expected_groups.std(dim=0, unbiased=False))
+
     def test_preserves_physics_timing_and_action_alignment(self):
         class TinyEncoder(torch.nn.Module):
             def forward(self, images):

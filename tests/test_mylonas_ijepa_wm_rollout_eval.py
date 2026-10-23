@@ -25,6 +25,32 @@ class RolloutEvaluationModuleTest(unittest.TestCase):
 
 
 class RolloutEvaluationDatasetTest(unittest.TestCase):
+    def test_dense_cache_uses_five_action_steps_with_offset_start(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "latents").mkdir()
+            (root / "trajectories").mkdir()
+            latents = np.arange(16, dtype=np.float16).reshape(16, 1, 1)
+            actions = torch.arange(30, dtype=torch.float32).reshape(15, 2)
+            states = torch.arange(64, dtype=torch.float32).reshape(16, 4)
+            np.save(root / "latents" / "episode_0000.npy", latents)
+            torch.save({
+                "actions": actions,
+                "macro_actions": actions.reshape(3, 10),
+                "sampled_states": states,
+                "frame_indices": torch.arange(16),
+                "actions_per_model_step": 5,
+                "embedding_frame_stride": 1,
+            }, root / "trajectories" / "episode_0000.pt")
+            dataset = evaluate_rollouts.RolloutEvaluationDataset(
+                root / "latents", root / "trajectories", [0], num_hist=2, horizon=1,
+            )
+            self.assertEqual(len(dataset), 6)
+            sample = dataset[1]
+            torch.testing.assert_close(sample["latent_sequence"].flatten().float(), torch.tensor([1., 6., 11.]))
+            torch.testing.assert_close(sample["positions"], states[[1, 6, 11], :2])
+            torch.testing.assert_close(sample["actions"][0], actions[1:6].flatten())
+
     def test_returns_aligned_history_targets_and_actions(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

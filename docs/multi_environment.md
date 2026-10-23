@@ -64,6 +64,38 @@ planner rejects a checkpoint from another environment. A Wall planning config
 may specify a different layout for transfer testing, provided the state and
 action dimensions still match.
 
+### Training windows starting at every environment action
+
+The default cache above embeds frames 0, 5, 10, ... for a five-action model
+step. To train with windows starting at every action, embed the **same raw
+episodes** into a separate cache using `--embedding-frame-stride 1`:
+
+```bash
+python -m src.mylonas_ijepa_wm.embed_frames \
+  --env wall --env-config "$ENV_CONFIG" --input-dir "$RAW_DIR" \
+  --output-dir "$DENSE_CACHE_DIR" --checkpoint-path "$ENCODER_CHECKPOINT" \
+  --embedding-frame-stride 1 --start-index 0 --end-index 2000 \
+  --encoder-batch-size 4 --resume
+```
+
+Then point `wm_proprio` (or the visual-only `wm`) at
+`$DENSE_CACHE_DIR/latents` and `$DENSE_CACHE_DIR/trajectories`. No trainer flag
+is needed: cache metadata selects the window spacing. For example, a Wall
+episode with 50 actions and a history of 3 yields training windows starting
+at frames 0 through 35. One such window reads latent frames 1, 6, 11, 16
+and groups raw actions 1–5, 6–10, 11–15. The predictor still advances five
+environment actions per model step. Rollout evaluation accepts the same cache.
+Planning uses online images and the trained checkpoint, so its command does
+not change.
+
+This follows DINO-WM's one-action sliding-window principle; the current
+loader keeps every window with a valid target, including the final few
+windows that DINO-WM's slicer omits. The dense cache requires the raw frames
+and roughly five times the embedding compute and latent storage of the
+sparse cache. Existing sparse caches cannot supply the missing intermediate
+frames. Keep the two cache directories separate; `--resume` checks their
+embedding stride before skipping a file.
+
 For fixed-layout Wall training, use `--wall-policy mixed`: even-indexed
 episodes use random actions and odd-indexed episodes steer through the door,
 then toward the opposite side. The doorway policy uses the true wall and door

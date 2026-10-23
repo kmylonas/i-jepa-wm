@@ -143,7 +143,16 @@ def compute_action_statistics(trajectory_dir, episode_ids):
             map_location="cpu",
             weights_only=True,
         )
-        actions.append(trajectory["macro_actions"].float())
+        model_stride = int(trajectory.get("actions_per_model_step", 1))
+        embedding_stride = int(trajectory.get("embedding_frame_stride", model_stride))
+        if embedding_stride < model_stride:
+            raw = trajectory["actions"].float()
+            grouped = raw.unfold(0, model_stride, 1).permute(0, 2, 1).reshape(
+                -1, model_stride * raw.shape[1]
+            )
+            actions.append(grouped)
+        else:
+            actions.append(trajectory["macro_actions"].float())
 
     actions = torch.cat(actions, dim=0)
     action_mean = actions.mean(dim=0)
@@ -238,6 +247,9 @@ class WorldModelDataset(torch.utils.data.Dataset):
 
         self.samples = []
         self.actions = {}
+        self.model_frame_steps = {}
+        self.action_group_sizes = {}
+        self.cache_timing = None
         self._latent_cache = OrderedDict()
 
         for episode_id in episode_ids:
@@ -266,17 +278,40 @@ class WorldModelDataset(torch.utils.data.Dataset):
                 map_location="cpu",
                 weights_only=True,
             )
-            actions = trajectory["macro_actions"].float()
-
-            if len(actions) < num_frames - 1:
-                raise ValueError(
-                    f"Episode {episode_id} has {num_frames} latent frames "
-                    f"but only {len(actions)} macro actions"
+            model_stride = int(trajectory.get("actions_per_model_step", 1))
+            embedding_stride = int(trajectory.get("embedding_frame_stride", model_stride))
+            if model_stride < 1 or embedding_stride < 1 or model_stride % embedding_stride:
+                raise ValueError(f"Episode {episode_id} has incompatible embedding and model strides")
+            timing = (model_stride, embedding_stride)
+            if self.cache_timing is not None and timing != self.cache_timing:
+                raise ValueError(f"Episode {episode_id} has different model or embedding frame stride")
+            self.cache_timing = timing
+            frame_step = model_stride // embedding_stride
+            frame_indices = trajectory.get("frame_indices")
+            if frame_indices is not None and (
+                len(frame_indices) != num_frames
+                or not torch.equal(
+                    frame_indices,
+                    torch.arange(num_frames, dtype=torch.int64) * embedding_stride,
                 )
+            ):
+                raise ValueError(f"Episode {episode_id} frame_indices do not match the latents")
+            if frame_step == 1:
+                actions = trajectory["macro_actions"].float()
+                required_actions = num_frames - 1
+            else:
+                if "actions" not in trajectory:
+                    raise ValueError(f"Episode {episode_id} needs raw actions for offset windows")
+                actions = trajectory["actions"].float()
+                required_actions = (num_frames - 1) * embedding_stride
+            if len(actions) < required_actions:
+                raise ValueError(f"Episode {episode_id} has too few actions for {num_frames} latent frames")
 
             self.actions[episode_id] = actions
+            self.model_frame_steps[episode_id] = frame_step
+            self.action_group_sizes[episode_id] = model_stride
 
-            num_samples = num_frames - num_hist - rollout_steps + 1
+            num_samples = num_frames - (num_hist + rollout_steps - 1) * frame_step
             for start in range(num_samples):
                 self.samples.append((episode_id, start))
 
@@ -304,15 +339,26 @@ class WorldModelDataset(torch.utils.data.Dataset):
 
         latents = self.load_latents(episode_id)
 
-        latent_end = start + self.num_hist + self.rollout_steps
-        action_end = latent_end - 1
+        sequence_length = self.num_hist + self.rollout_steps
+        frame_step = self.model_frame_steps[episode_id]
 
         latent_window = np.array(
-            latents[start:latent_end],
+            latents[start:start + sequence_length * frame_step:frame_step],
             copy=True,
         )
 
-        actions = self.actions[episode_id][start:action_end]
+        if frame_step == 1:
+            actions = self.actions[episode_id][start:start + sequence_length - 1]
+        else:
+            model_stride = self.action_group_sizes[episode_id]
+            embedding_stride = model_stride // frame_step
+            raw_start = start * embedding_stride
+            actions = torch.stack([
+                self.actions[episode_id][
+                    raw_start + step * model_stride:raw_start + (step + 1) * model_stride
+                ].flatten()
+                for step in range(sequence_length - 1)
+            ])
 
         if self.action_mean is not None:
             actions = (
@@ -568,6 +614,12 @@ def validate_checkpoint_metadata(
         current_metadata.get("physics_frame_skip", 1)
     ):
         raise ValueError("Current physics_frame_skip does not match the checkpoint")
+    if include_training_objective and int(saved_metadata.get(
+        "embedding_frame_stride", saved_metadata.get("actions_per_model_step", 5)
+    )) != int(current_metadata.get(
+        "embedding_frame_stride", current_metadata.get("actions_per_model_step", 5)
+    )):
+        raise ValueError("Current embedding_frame_stride does not match the checkpoint")
 
     for key in exact_keys:
         saved_value = saved_metadata.get(key)
@@ -829,6 +881,8 @@ def create_data_loaders(
         episode_ids=test_ids,
         **dataset_arguments,
     )
+    if not (train_dataset.cache_timing == val_dataset.cache_timing == test_dataset.cache_timing):
+        raise ValueError("Training, validation, and test caches have different frame strides")
 
     generator = torch.Generator().manual_seed(args.seed)
     loader_num_workers = resolve_num_workers(
@@ -935,6 +989,7 @@ def main(argv=None):
         action_mean,
         action_std,
     )
+    embedding_frame_stride = train_loader.dataset.cache_timing[1]
 
     model_configuration = {
         "num_patches": args.num_patches,
@@ -954,6 +1009,7 @@ def main(argv=None):
     checkpoint_metadata = {
         "model_configuration": model_configuration,
         "physics_frame_skip": physics_frame_skip,
+        "embedding_frame_stride": embedding_frame_stride,
         "train_ids": train_ids,
         "val_ids": val_ids,
         "test_ids": test_ids,

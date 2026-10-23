@@ -74,6 +74,7 @@ def process_episode(
     environment=None,
     actions_per_model_step=None,
     encoder_batch_size=None,
+    embedding_frame_stride=None,
 ):
     episode_env = episode.get("environment", "pointmaze")
     if environment is not None and episode_env != environment:
@@ -83,13 +84,16 @@ def process_episode(
             and int(recorded_stride) != int(actions_per_model_step)):
         raise ValueError("Embedding action grouping differs from the raw episode")
     stride = int(actions_per_model_step or episode.get("actions_per_model_step", frame_skip))
+    embedding_stride = stride if embedding_frame_stride is None else int(embedding_frame_stride)
+    if embedding_stride < 1 or stride % embedding_stride:
+        raise ValueError("embedding_frame_stride must be a positive divisor of actions_per_model_step")
     actions = episode["actions"].to(device="cpu", dtype=torch.float32)
     states = episode["states"].to(device="cpu", dtype=torch.float32)
     if stride < 1 or actions.ndim != 2 or len(actions) % stride:
         raise ValueError("actions must be [steps, action_dim] and divisible by model stride")
     if len(episode["frames"]) != len(actions) + 1 or len(states) != len(episode["frames"]):
         raise ValueError("raw frames, actions, and states are not aligned")
-    selected_frames = episode["frames"][::stride]
+    selected_frames = episode["frames"][::embedding_stride]
     images = preprocess_frames(selected_frames)
     batch_size = len(images) if encoder_batch_size is None else int(encoder_batch_size)
     if batch_size < 1:
@@ -107,7 +111,7 @@ def process_episode(
     frame_indices = torch.arange(
         0,
         len(episode["frames"]),
-        stride,
+        embedding_stride,
         dtype=torch.int64,
     )
 
@@ -135,6 +139,7 @@ def process_episode(
         "collection_policy": episode.get("collection_policy"),
         "state_fields": tuple(episode.get("state_fields", ("x", "y", "vx", "vy"))),
         "actions_per_model_step": stride,
+        "embedding_frame_stride": embedding_stride,
         "physics_frame_skip": int(episode.get("physics_frame_skip", 1)),
         "control_dt_seconds": episode.get(
             "control_dt_seconds",
@@ -217,6 +222,11 @@ def parse_args(argv=None):
         "--encoder-batch-size", type=int, default=4,
         help="Frames per encoder forward pass; reduce this if the GPU runs out of memory.",
     )
+    parser.add_argument(
+        "--embedding-frame-stride", type=int,
+        help="Cache every Nth frame. Use 1 for DINO-style windows starting at each action; "
+             "the default caches one frame per model step.",
+    )
 
     return parser.parse_args(argv)
 
@@ -229,6 +239,11 @@ def main():
         raise ValueError("start-index must be non-negative")
     if args.end_index <= args.start_index:
         raise ValueError("end-index must be greater than start-index")
+    if args.embedding_frame_stride is not None and (
+        args.embedding_frame_stride < 1
+        or config.actions_per_model_step % args.embedding_frame_stride
+    ):
+        raise ValueError("embedding-frame-stride must be a positive divisor of actions-per-model-step")
     if not args.input_dir.is_dir():
         raise NotADirectoryError(f"Input directory not found: {args.input_dir}")
     if not args.checkpoint_path.is_file():
@@ -279,6 +294,10 @@ def main():
         trajectory_path = trajectory_directory / f"{episode_name}.pt"
 
         if args.resume and latent_path.exists() and trajectory_path.exists():
+            saved = torch.load(trajectory_path, map_location="cpu", weights_only=True)
+            expected_stride = args.embedding_frame_stride or config.actions_per_model_step
+            if int(saved.get("embedding_frame_stride", saved.get("actions_per_model_step", frame_skip))) != expected_stride:
+                raise ValueError(f"{episode_name} was embedded with a different frame stride")
             print(f"Skipping completed {episode_name}")
             continue
 
@@ -307,6 +326,7 @@ def main():
             environment=config.env,
             actions_per_model_step=config.actions_per_model_step,
             encoder_batch_size=args.encoder_batch_size,
+            embedding_frame_stride=args.embedding_frame_stride,
         )
     
 
