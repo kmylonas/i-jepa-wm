@@ -130,6 +130,35 @@ class MultiEnvironmentTest(unittest.TestCase):
         self.assertEqual(record["proprio_states"][-1], [2., 0.])
         self.assertEqual(plan.call_args.kwargs["action_history"].shape, (1, 4))
 
+    def test_wall_planner_replans_with_one_frame_history(self):
+        class OneFrameModel(torch.nn.Module):
+            num_hist = 1
+
+            def forward(self, latents, states, actions):
+                next_states = states.clone()
+                next_states[:, -1, 0] += actions[:, -1, 0]
+                return latents, next_states
+
+        adapter = FakeWall()
+        adapter.goal = np.array([100., 0.], dtype=np.float32)
+        config = EnvironmentConfig(env="wall", actions_per_model_step=2)
+        metadata = {
+            "state_mean": torch.zeros(2), "state_std": torch.ones(2),
+            "action_mean": None, "action_std": None,
+        }
+        args = argparse.Namespace(
+            cost="position", max_macro_steps=2, planning_horizon=1,
+            actions_per_plan=1, population=2, num_elites=1,
+            cem_iterations=1, candidate_batch_size=2, min_std=0.05,
+        )
+        with patch.object(plan_proprio.visual, "encode_frame", return_value=torch.zeros(1, 1)):
+            record = plan_proprio.run_episode(
+                adapter, config, object(), OneFrameModel(), metadata, args,
+                torch.device("cpu"), "fp32", 0, None,
+            )
+
+        self.assertEqual(record["macro_steps"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

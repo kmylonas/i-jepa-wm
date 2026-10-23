@@ -100,9 +100,10 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
             state_history = torch.cat([
                 state_history[1:], ((next_state - state_mean) / state_std).unsqueeze(0)
             ], dim=0)
-            action_history = torch.cat([
-                action_history[1:], torch.as_tensor(macro, device=device).unsqueeze(0)
-            ], dim=0)
+            if num_hist > 1:
+                action_history = torch.cat([
+                    action_history[1:], torch.as_tensor(macro, device=device).unsqueeze(0)
+                ], dim=0)
             actions.append(macro.tolist())
             positions.append(outcome.state[:2].tolist())
             states.append(outcome.state.tolist())
