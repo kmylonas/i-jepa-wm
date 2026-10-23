@@ -1,0 +1,6 @@
+{
+  "env": "pointmaze",
+  "actions_per_model_step": 5,
+  "pointmaze_environment_id": "PointMaze_UMaze-v3",
+  "pointmaze_physics_frame_skip": 5
+}

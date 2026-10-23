@@ -67,7 +67,7 @@ def rollout_action_sequences(
 ):
     if latent_history.ndim != 4 or latent_history.shape[0] != 1:
         raise ValueError("latent_history must have shape [1, hist, patches, dim]")
-    if state_history.shape[:2] != latent_history.shape[:2] or state_history.shape[-1] != 4:
+    if state_history.shape[:2] != latent_history.shape[:2] or state_history.shape[-1] < 2:
         raise ValueError("state_history must align with latent_history")
     if action_history.shape[0] != latent_history.shape[1] - 1:
         raise ValueError("action_history must contain hist - 1 actions")
@@ -110,8 +110,8 @@ def rollout_action_sequences(
 
 def compute_terminal_position_cost(predicted_states, goal_position, state_mean, state_std):
     """Euclidean distance from the predicted terminal position to the maze goal."""
-    if predicted_states.ndim != 3 or predicted_states.shape[-1] != 4:
-        raise ValueError("predicted_states must have shape [population, horizon, 4]")
+    if predicted_states.ndim != 3 or predicted_states.shape[-1] < 2:
+        raise ValueError("predicted_states must contain at least x and y")
     terminal_xy = predicted_states[:, -1, :2].float()
     mean_xy = torch.as_tensor(
         state_mean, device=terminal_xy.device, dtype=torch.float32

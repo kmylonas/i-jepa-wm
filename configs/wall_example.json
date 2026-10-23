@@ -1,0 +1,8 @@
+{
+  "env": "wall",
+  "actions_per_model_step": 5,
+  "wall_layouts": [[28, 20], [28, 40], [32, 20], [32, 40], [36, 20], [36, 40]],
+  "wall_action_limit": 1.0,
+  "wall_success_threshold": 4.5,
+  "dino_wm_root": "/absolute/path/to/dino_wm"
+}

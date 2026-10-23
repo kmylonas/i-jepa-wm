@@ -1,6 +1,7 @@
 """Train a top-down I-JEPA world model conditioned on position and velocity."""
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ import torch
 
 from src.mylonas_ijepa_wm import wm
 from src.mylonas_ijepa_wm.proprio_vit import ProprioViT
+from src.mylonas_ijepa_wm.environment_configs import load_environment_config
 
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -54,6 +56,8 @@ def parse_args(argv=None):
         description="Train a top-down I-JEPA world model with proprioception."
     )
     parser.add_argument("--latent-dir", type=Path, default=DEFAULT_CACHE / "latents")
+    parser.add_argument("--env", choices=["pointmaze", "wall"], default="pointmaze")
+    parser.add_argument("--env-config", type=Path)
     parser.add_argument("--trajectory-dir", type=Path, default=DEFAULT_CACHE / "trajectories")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--num-episodes", type=int, default=2000)
@@ -63,7 +67,7 @@ def parse_args(argv=None):
     parser.add_argument("--num-hist", type=int, default=3)
     parser.add_argument("--num-patches", type=int, default=256)
     parser.add_argument("--ijepa-dim", type=int, default=1280)
-    parser.add_argument("--action-dim", type=int, default=10)
+    parser.add_argument("--action-dim", type=int)
     parser.add_argument("--action-embed-dim", type=int, default=32)
     parser.add_argument("--proprio-embed-dim", type=int, default=32)
     parser.add_argument("--embed-dim", type=int, default=256)
@@ -98,7 +102,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def compute_proprio_statistics(trajectory_dir, episode_ids):
+def compute_proprio_statistics(trajectory_dir, episode_ids, state_dim=4):
     states = []
     for episode_id in episode_ids:
         trajectory = torch.load(
@@ -107,8 +111,8 @@ def compute_proprio_statistics(trajectory_dir, episode_ids):
             weights_only=True,
         )
         sampled_states = trajectory["sampled_states"].float()
-        if sampled_states.ndim != 2 or sampled_states.shape[1] != 4:
-            raise ValueError(f"Episode {episode_id} sampled_states must be [frames, 4]")
+        if sampled_states.ndim != 2 or sampled_states.shape[1] != state_dim:
+            raise ValueError(f"Episode {episode_id} sampled_states must be [frames, {state_dim}]")
         if not torch.isfinite(sampled_states).all():
             raise ValueError(f"Episode {episode_id} sampled_states are not finite")
         states.append(sampled_states)
@@ -133,6 +137,7 @@ class ProprioWorldModelDataset(wm.WorldModelDataset):
         episode_cache_size=8,
         preload_latents=False,
         rollout_steps=1,
+        state_dim=4,
     ):
         super().__init__(
             latent_dir=latent_dir,
@@ -145,10 +150,10 @@ class ProprioWorldModelDataset(wm.WorldModelDataset):
             preload_latents=preload_latents,
             rollout_steps=rollout_steps,
         )
-        self.state_mean = torch.zeros(4) if state_mean is None else state_mean.float()
-        self.state_std = torch.ones(4) if state_std is None else state_std.float()
-        if self.state_mean.shape != (4,) or self.state_std.shape != (4,):
-            raise ValueError("state normalization must have four components")
+        self.state_mean = torch.zeros(state_dim) if state_mean is None else state_mean.float()
+        self.state_std = torch.ones(state_dim) if state_std is None else state_std.float()
+        if self.state_mean.shape != (state_dim,) or self.state_std.shape != (state_dim,):
+            raise ValueError(f"state normalization must have {state_dim} components")
         if not torch.isfinite(self.state_mean).all() or not torch.isfinite(self.state_std).all():
             raise ValueError("state normalization must be finite")
         if not torch.all(self.state_std > 0):
@@ -169,9 +174,9 @@ class ProprioWorldModelDataset(wm.WorldModelDataset):
                 mmap_mode="r",
                 allow_pickle=False,
             ))
-            if states.shape != (num_frames, 4):
+            if states.shape != (num_frames, state_dim):
                 raise ValueError(
-                    f"Episode {episode_id} sampled_states must have shape [{num_frames}, 4]"
+                    f"Episode {episode_id} sampled_states must have shape [{num_frames}, {state_dim}]"
                 )
             if not torch.isfinite(states).all():
                 raise ValueError(f"Episode {episode_id} sampled_states are not finite")
@@ -343,6 +348,12 @@ def run_epoch(
 
 def validate_checkpoint_metadata(saved, current, include_objective=True):
     wm.validate_checkpoint_metadata(saved, current, include_objective)
+    if saved.get("environment", "pointmaze") != current.get("environment", "pointmaze"):
+        raise ValueError("Current environment does not match the checkpoint")
+    if int(saved.get("actions_per_model_step", 5)) != current.get("actions_per_model_step", 5):
+        raise ValueError("Current action grouping does not match the checkpoint")
+    if saved.get("environment_config") and saved["environment_config"] != current.get("environment_config"):
+        raise ValueError("Current environment configuration does not match the checkpoint")
     if int(saved.get("physics_frame_skip", 1)) != current["physics_frame_skip"]:
         raise ValueError("Current physics_frame_skip does not match the checkpoint")
     for key in ("model_type", "camera", "proprio_fields", "proprio_loss_weight"):
@@ -358,11 +369,13 @@ def load_model_and_metadata(checkpoint_path, device):
     metadata = checkpoint.get("metadata", {})
     if metadata.get("model_type") != MODEL_TYPE or metadata.get("camera") != "topdown":
         raise ValueError("checkpoint is not a top-down proprioceptive world model")
-    if tuple(metadata.get("proprio_fields", ())) != PROPRIO_FIELDS:
-        raise ValueError("checkpoint proprioception fields do not match x,y,vx,vy")
+    env_name = metadata.get("environment", "pointmaze")
+    expected_fields = load_environment_config(env_name).state_fields
+    if tuple(metadata.get("proprio_fields", ())) != expected_fields:
+        raise ValueError("checkpoint proprioception fields do not match its environment")
     for key in ("state_mean", "state_std"):
-        if key not in metadata or metadata[key].shape != (4,):
-            raise ValueError(f"checkpoint is missing four-component {key}")
+        if key not in metadata or metadata[key].shape != (len(expected_fields),):
+            raise ValueError(f"checkpoint has invalid {key}")
     model = ProprioViT(**metadata["model_configuration"])
     model.load_state_dict(checkpoint["model"])
     model = model.to(device).eval()
@@ -372,6 +385,7 @@ def load_model_and_metadata(checkpoint_path, device):
 
 def main(argv=None):
     args = parse_args(argv)
+    config = load_environment_config(args.env, args.env_config)
     if not args.latent_dir.is_dir() or not args.trajectory_dir.is_dir():
         raise NotADirectoryError("top-down latent and trajectory directories are required")
     if args.epochs < 1 or args.batch_size < 1 or args.validate_every < 1:
@@ -396,13 +410,45 @@ def main(argv=None):
     physics_frame_skip = read_physics_frame_skip(
         args.trajectory_dir, [*train_ids, *val_ids, *test_ids]
     )
+    if args.env == "pointmaze" and args.env_config is None:
+        first = torch.load(
+            args.trajectory_dir / f"episode_{train_ids[0]:04d}.pt",
+            map_location="cpu", weights_only=True,
+        )
+        config = replace(
+            config,
+            pointmaze_physics_frame_skip=physics_frame_skip,
+            actions_per_model_step=int(first.get("actions_per_model_step", 5)),
+        )
+    state_dim = len(config.state_fields)
+    action_dim = config.macro_action_dim if args.action_dim is None else args.action_dim
+    if action_dim != config.macro_action_dim:
+        raise ValueError(f"--action-dim must be {config.macro_action_dim} for {args.env}")
+    expected_physics = config.pointmaze_physics_frame_skip if args.env == "pointmaze" else 1
+    if physics_frame_skip != expected_physics:
+        raise ValueError("Cache physics_frame_skip does not match --env-config")
+    for episode_id in [*train_ids, *val_ids, *test_ids]:
+        trajectory = torch.load(
+            args.trajectory_dir / f"episode_{episode_id:04d}.pt",
+            map_location="cpu", weights_only=True,
+        )
+        if trajectory.get("environment", "pointmaze") != args.env:
+            raise ValueError(f"Episode {episode_id} belongs to another environment")
+        if trajectory["macro_actions"].shape[-1] != config.macro_action_dim:
+            raise ValueError(f"Episode {episode_id} has incompatible actions")
+        if trajectory["sampled_states"].shape[-1] != state_dim:
+            raise ValueError(f"Episode {episode_id} has incompatible state dimension")
+        if tuple(trajectory.get("state_fields", PROPRIO_FIELDS)) != config.state_fields:
+            raise ValueError(f"Episode {episode_id} has incompatible state fields")
+        if trajectory.get("environment_config") and trajectory["environment_config"] != config.portable_metadata():
+            raise ValueError(f"Episode {episode_id} has different environment settings")
     action_mean = action_std = None
     if args.normalize_actions:
         action_mean, action_std = wm.compute_action_statistics(
             args.trajectory_dir, train_ids
         )
     state_mean, state_std = compute_proprio_statistics(
-        args.trajectory_dir, train_ids
+        args.trajectory_dir, train_ids, state_dim=state_dim
     )
     dataset_args = dict(
         latent_dir=args.latent_dir,
@@ -414,6 +460,7 @@ def main(argv=None):
         state_std=state_std,
         preload_latents=args.preload_latents,
         rollout_steps=args.rollout_steps,
+        state_dim=state_dim,
     )
     train_dataset = ProprioWorldModelDataset(episode_ids=train_ids, **dataset_args)
     val_dataset = ProprioWorldModelDataset(episode_ids=val_ids, **dataset_args)
@@ -439,9 +486,9 @@ def main(argv=None):
         num_hist=args.num_hist,
         num_t_blocks=args.num_blocks,
         ijepa_dim=args.ijepa_dim,
-        action_dim=args.action_dim,
+        action_dim=action_dim,
         action_embed_dim=args.action_embed_dim,
-        proprio_dim=4,
+        proprio_dim=state_dim,
         proprio_embed_dim=args.proprio_embed_dim,
         embed_dim=args.embed_dim,
         num_heads=args.num_heads,
@@ -451,9 +498,12 @@ def main(argv=None):
     model = ProprioViT(**model_configuration).to(device)
     metadata = dict(
         model_type=MODEL_TYPE,
+        environment=args.env,
+        environment_config=config.portable_metadata(),
+        actions_per_model_step=config.actions_per_model_step,
         camera="topdown",
         physics_frame_skip=physics_frame_skip,
-        proprio_fields=PROPRIO_FIELDS,
+        proprio_fields=config.state_fields,
         model_configuration=model_configuration,
         train_ids=train_ids,
         val_ids=val_ids,

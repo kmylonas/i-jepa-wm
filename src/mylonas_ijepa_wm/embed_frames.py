@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 import src.models.vision_transformer as vit
 import argparse
+from src.mylonas_ijepa_wm.environment_configs import load_environment_config
 
 
 
@@ -70,42 +71,48 @@ def process_episode(
     device,
     episode_name,
     output_directory,
+    environment=None,
+    actions_per_model_step=None,
+    encoder_batch_size=None,
 ):
-    selected_frames = episode["frames"][::frame_skip]
+    episode_env = episode.get("environment", "pointmaze")
+    if environment is not None and episode_env != environment:
+        raise ValueError(f"Raw episode environment {episode_env} does not match {environment}")
+    recorded_stride = episode.get("actions_per_model_step")
+    if (actions_per_model_step is not None and recorded_stride is not None
+            and int(recorded_stride) != int(actions_per_model_step)):
+        raise ValueError("Embedding action grouping differs from the raw episode")
+    stride = int(actions_per_model_step or episode.get("actions_per_model_step", frame_skip))
+    actions = episode["actions"].to(device="cpu", dtype=torch.float32)
+    states = episode["states"].to(device="cpu", dtype=torch.float32)
+    if stride < 1 or actions.ndim != 2 or len(actions) % stride:
+        raise ValueError("actions must be [steps, action_dim] and divisible by model stride")
+    if len(episode["frames"]) != len(actions) + 1 or len(states) != len(episode["frames"]):
+        raise ValueError("raw frames, actions, and states are not aligned")
+    selected_frames = episode["frames"][::stride]
     images = preprocess_frames(selected_frames)
-    images = images.to(device)
+    batch_size = len(images) if encoder_batch_size is None else int(encoder_batch_size)
+    if batch_size < 1:
+        raise ValueError("encoder_batch_size must be positive")
     with torch.inference_mode():
-        tokens = encoder(images) #(B, 256, 1280)
-
-    tokens = tokens.to(
-                device="cpu",
-                dtype=torch.float16,
+        tokens = torch.cat([
+            encoder(images[start:start + batch_size].to(device)).to(
+                device="cpu", dtype=torch.float16
             )
+            for start in range(0, len(images), batch_size)
+        ], dim=0)
     print("Final tokens:", tokens.shape, tokens.dtype)
 
     ### trajectory
     frame_indices = torch.arange(
         0,
         len(episode["frames"]),
-        frame_skip,
+        stride,
         dtype=torch.int64,
     )
 
 
-    actions = episode["actions"].to(
-    device="cpu",
-    dtype=torch.float32,
-    )
-
-    states = episode["states"].to(
-        device="cpu",
-        dtype=torch.float32,
-    )
-
-    # Five consecutive 2D actions connect two cached observations.
-    #
-    # [100, 2] -> [20, 5, 2] -> [20, 10]
-    macro_actions = actions.reshape(20, frame_skip, 2).flatten(1)
+    macro_actions = actions.reshape(-1, stride, actions.shape[-1]).flatten(1)
 
     # States corresponding to frames 0, 5, 10, ..., 100.
     sampled_states = states[frame_indices]
@@ -122,12 +129,16 @@ def process_episode(
 
         # Episode metadata
         "desired_goal": episode["desired_goal"].cpu(),
+        "environment": episode_env,
+        "environment_config": episode.get("environment_config", {}),
+        "wall_layout": episode.get("wall_layout"),
+        "collection_policy": episode.get("collection_policy"),
+        "state_fields": tuple(episode.get("state_fields", ("x", "y", "vx", "vy"))),
+        "actions_per_model_step": stride,
         "physics_frame_skip": int(episode.get("physics_frame_skip", 1)),
-        "control_dt_seconds": float(
-            episode.get(
-                "control_dt_seconds",
-                0.01 * int(episode.get("physics_frame_skip", 1)),
-            )
+        "control_dt_seconds": episode.get(
+            "control_dt_seconds",
+            0.01 * int(episode.get("physics_frame_skip", 1)),
         ),
     }
 
@@ -142,18 +153,16 @@ def process_episode(
     trajectory_path = (
             trajectory_directory / f"{episode_name}.pt"
         )
-    torch.save(trajectory, trajectory_path)
-
-
     output_path = latent_directory / f"{episode_name}.npy"
-
-
-    # tokens: torch.float16 CPU tensor [21, 256, 1280]
-    np.save(
-        output_path,
-        tokens.numpy(),
-        allow_pickle=False,
-    )
+    latent_temporary = output_path.with_suffix(".npy.tmp")
+    trajectory_temporary = trajectory_path.with_suffix(".pt.tmp")
+    # Commit both files only after their writes finish, so --resume cannot
+    # treat an interrupted embedding as a completed episode.
+    with latent_temporary.open("wb") as file:
+        np.save(file, tokens.numpy(), allow_pickle=False)
+    torch.save(trajectory, trajectory_temporary)
+    latent_temporary.replace(output_path)
+    trajectory_temporary.replace(trajectory_path)
 
     return
 
@@ -202,12 +211,19 @@ def parse_args(argv=None):
         action="store_true",
         help="Skip episodes whose outputs already exist.",
     )
+    parser.add_argument("--env", choices=["pointmaze", "wall"], default="pointmaze")
+    parser.add_argument("--env-config", type=Path)
+    parser.add_argument(
+        "--encoder-batch-size", type=int, default=4,
+        help="Frames per encoder forward pass; reduce this if the GPU runs out of memory.",
+    )
 
     return parser.parse_args(argv)
 
 
 def main():
     args = parse_args()
+    config = load_environment_config(args.env, args.env_config)
 
     if args.start_index < 0:
         raise ValueError("start-index must be non-negative")
@@ -279,6 +295,8 @@ def main():
             map_location="cpu",
             weights_only=True,
         )
+        if episode.get("environment_config") and episode["environment_config"] != config.portable_metadata():
+            raise ValueError(f"{episode_name} environment settings differ from --env-config")
 
         process_episode(
             episode=episode,
@@ -286,6 +304,9 @@ def main():
             device=device,
             episode_name=episode_name,
             output_directory=args.output_dir,
+            environment=config.env,
+            actions_per_model_step=config.actions_per_model_step,
+            encoder_batch_size=args.encoder_batch_size,
         )
     
 
