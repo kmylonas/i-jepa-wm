@@ -114,7 +114,7 @@ resumes. Raw batches can be removed after a successful full audit and their
 latent files and trajectory sidecars have been verified.
 
 The local Mac has MPS but no CUDA, so the full training and planning matrix
-were not run here. Local verification passed 221 tests and 16 subtests after
+were not run here. Local verification passed 222 tests and 16 subtests after
 excluding four unrelated legacy test modules that need `torchvision` or a
 different package import path in this Python environment. All nine relevant
 CLI `--help` checks passed. The remaining test warning concerns unavailable
@@ -171,7 +171,9 @@ iterations, and at most 20 WM steps. It tests unbounded actions, Euclidean
 primitive-action caps of 4.0, and the training maximum of 3.5. Capped modes
 set `--unbounded-actions` before applying the norm cap, avoiding the adapter's
 `[-1, 1]` component box. JSON output, videos, and per-layout Wilson intervals
-are stored under `planning/`. Treat the fixed checkpoint as a historical
+are stored under `planning/`. Each result has an identity sidecar with hashes
+of its model, encoder, and manifest; resume checks these before reusing a
+result. Treat the fixed checkpoint as a historical
 transfer reference because its collection policy and training layouts differ.
 
 For a training-layout sanity check, run `plan_proprio` separately with a

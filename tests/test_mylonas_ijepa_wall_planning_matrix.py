@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +103,21 @@ def test_matrix_rejects_multi_checkpoint_from_other_manifest_before_planning(tmp
         run_matrix(manifest, config_path, tmp_path / "output", Path("encoder.pt"),
                    checkpoint, Path("fixed.pt"), num_episodes=1)
     assert not (tmp_path / "output").exists()
+
+
+def test_resume_identity_rejects_replaced_checkpoint_at_same_path(tmp_path):
+    from src.mylonas_ijepa_wm.run_wall_planning_matrix import (
+        file_sha256, validate_run_identity,
+    )
+
+    checkpoint = tmp_path / "model.pt"
+    checkpoint.write_bytes(b"first checkpoint")
+    identity = tmp_path / "result.identity.json"
+    identity.write_text(json.dumps({"checkpoint_sha256": file_sha256(checkpoint)}))
+    validate_run_identity(identity, {"checkpoint_sha256": file_sha256(checkpoint)})
+    checkpoint.write_bytes(b"second checkpoint")
+    with pytest.raises(ValueError, match="identity"):
+        validate_run_identity(identity, {"checkpoint_sha256": file_sha256(checkpoint)})
 
 
 def test_planning_record_contains_actual_wall_layout(monkeypatch):

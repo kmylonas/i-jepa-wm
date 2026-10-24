@@ -1,6 +1,7 @@
 """Run matched DotWall CEM evaluations across held-out layouts and action modes."""
 
 import argparse
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -11,8 +12,23 @@ import torch
 
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
 from src.mylonas_ijepa_wm.wall_layout_manifest import (
-    load_manifest, validate_checkpoint_manifest,
+    load_manifest, manifest_digest, validate_checkpoint_manifest,
 )
+
+
+def file_sha256(path: Path) -> str:
+    digest = sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_run_identity(path: Path, expected: dict) -> None:
+    if not path.is_file():
+        raise ValueError(f"Planning result identity is missing: {path}")
+    if json.loads(path.read_text()) != expected:
+        raise ValueError(f"Planning result identity differs from current inputs: {path}")
 
 
 def wilson_interval(successes: int, episodes: int) -> tuple[float, float]:
@@ -142,6 +158,11 @@ def run_matrix(
         multi_checkpoint, map_location="cpu", weights_only=True,
     ).get("metadata", {})
     validate_checkpoint_manifest(multi_metadata, manifest)
+    file_identities = {
+        "encoder": file_sha256(encoder_checkpoint),
+        "multi": file_sha256(multi_checkpoint),
+        "fixed": file_sha256(fixed_checkpoint),
+    }
     config = load_environment_config("wall", env_config)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -168,21 +189,38 @@ def run_matrix(
     results = []
     for item in invocations:
         path = Path(item["output"])
+        identity_path = path.with_suffix(".identity.json")
+        identity = dict(
+            manifest_sha256=manifest_digest(manifest),
+            checkpoint_sha256=file_identities[item["model"]],
+            encoder_sha256=file_identities["encoder"],
+        )
         if path.exists() and not resume:
             raise FileExistsError(f"Planning result already exists: {path}")
-        if not path.exists():
+        if path.exists():
+            validate_run_identity(identity_path, identity)
+        else:
             subprocess.run([
                 sys.executable, "-m", "src.mylonas_ijepa_wm.plan_proprio",
                 *item["argv"],
             ], check=True)
+            identity_path.write_text(json.dumps(identity, indent=2))
         payload = json.loads(path.read_text())
         results.append({
             "model": item["model"], "mode": item["mode"],
             "wall_layout": item["layout"], "result_path": str(path),
+            "identity_path": str(identity_path),
             **validate_planning_result(payload, item, expected_seeds),
         })
+    for name, checkpoint in (
+        ("encoder", encoder_checkpoint), ("multi", multi_checkpoint),
+        ("fixed", fixed_checkpoint),
+    ):
+        if file_sha256(checkpoint) != file_identities[name]:
+            raise ValueError(f"Checkpoint identity changed during planning: {checkpoint}")
     summary = dict(
         base_seed=base_seed, num_episodes=num_episodes,
+        file_identities=file_identities,
         action_modes=dict(unbounded=None, cap4=4.0,
                           cap_train=manifest["max_training_action_length"]),
         baseline_note="Fixed-layout checkpoint is a historical, non-isolated transfer baseline.",
