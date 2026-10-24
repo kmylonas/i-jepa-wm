@@ -45,3 +45,8 @@ src/mylonas_ijepa_wm/wall
 !tests/test_mylonas_ijepa_maze_transfer_collisions.py
 !tests/test_mylonas_ijepa_multi_environment.py
 !tests/test_dino_wall_matched_planning.py
+!tests/test_mylonas_ijepa_wall_layout_manifest.py
+!tests/test_mylonas_ijepa_wall_coverage.py
+!tests/test_mylonas_ijepa_wall_layout_training.py
+!tests/test_mylonas_ijepa_wall_collision_probes.py
+!tests/test_mylonas_ijepa_wall_planning_matrix.py

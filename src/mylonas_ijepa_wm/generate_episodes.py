@@ -9,6 +9,7 @@ import torch
 
 from src.mylonas_ijepa_wm.environment_adapters import create_adapter
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
+from src.mylonas_ijepa_wm.wall_layout_manifest import load_manifest, manifest_digest
 
 
 DINO_WALL_POLICY_PARAMETERS = {
@@ -60,9 +61,12 @@ def wall_door_action(position, target, layout, action_low, action_high, rng):
     return np.clip(action, action_low, action_high).astype(np.float32)
 
 
-def collect_episode(adapter, config, episode_index, steps_per_episode, seed, wall_policy="random"):
+def collect_episode(
+    adapter, config, episode_index, steps_per_episode, seed,
+    wall_policy="random", layout=None, manifest_sha256=None,
+):
     rng = np.random.default_rng(seed)
-    initial = adapter.reset(seed)
+    initial = adapter.reset(seed, layout=layout) if layout is not None else adapter.reset(seed)
     frames = [initial.frame]
     states = [initial.state]
     actions = []
@@ -70,6 +74,8 @@ def collect_episode(adapter, config, episode_index, steps_per_episode, seed, wal
         wall_policy == "door" or (wall_policy == "mixed" and episode_index % 2 == 1)
     )
     use_dino_policy = config.env == "wall" and wall_policy == "dino"
+    if wall_policy == "wide":
+        raise NotImplementedError("wide Wall policy is added in the coverage-audit task")
     dino_actions = sample_dino_wall_actions(rng, steps_per_episode) if use_dino_policy else None
     collection_policy = "random"
     if use_door_policy:
@@ -103,6 +109,7 @@ def collect_episode(adapter, config, episode_index, steps_per_episode, seed, wal
         "desired_goal": torch.as_tensor(adapter.goal, dtype=torch.float32),
         "episode_index": episode_index,
         "seed": seed,
+        "manifest_sha256": manifest_sha256,
         "environment": config.env,
         "environment_config": config.portable_metadata(),
         "wall_layout": getattr(adapter, "layout", None),
@@ -134,16 +141,31 @@ def parse_args(argv=None):
         help="Wall exploration policy; dino uses persistent random headings and variable action lengths.",
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--episode-manifest", type=Path,
+                        help="Explicit per-episode layout, seed, split, and policy assignments.")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     config = load_environment_config(args.env, args.env_config)
+    episode_manifest = load_manifest(args.episode_manifest) if args.episode_manifest else None
+    if episode_manifest and args.env != "wall":
+        raise ValueError("--episode-manifest requires --env wall")
+    if episode_manifest:
+        expected_layouts = {
+            tuple(layout) for split in ("train", "val", "test")
+            for layout in episode_manifest[f"{split}_layouts"]
+        }
+        if {tuple(layout) for layout in config.wall_layouts or []} != expected_layouts:
+            raise ValueError("Environment config wall_layouts disagree with episode manifest")
+        if args.steps_per_episode != episode_manifest["steps_per_episode"]:
+            raise ValueError("steps-per-episode differs from episode manifest")
     if args.num_episodes < 1 or args.steps_per_episode < 1:
         raise ValueError("episode counts and lengths must be positive")
-    end_index = args.num_episodes if args.end_index is None else args.end_index
-    if not 0 <= args.start_index < end_index <= args.num_episodes:
+    num_episodes = len(episode_manifest["episodes"]) if episode_manifest else args.num_episodes
+    end_index = num_episodes if args.end_index is None else args.end_index
+    if not 0 <= args.start_index < end_index <= num_episodes:
         raise ValueError("Require 0 <= start-index < end-index <= num-episodes")
     if args.steps_per_episode % config.actions_per_model_step:
         raise ValueError("steps-per-episode must divide into whole model steps")
@@ -152,12 +174,13 @@ def main(argv=None):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "environment_config": config.portable_metadata(),
-        "num_episodes": args.num_episodes,
+        "num_episodes": num_episodes,
         "steps_per_episode": args.steps_per_episode,
-        "base_seed": args.base_seed,
+        "base_seed": None if episode_manifest else args.base_seed,
         "image_shape": [224, 224, 3],
         "state_fields": config.state_fields,
-        "wall_policy": args.wall_policy,
+        "wall_policy": "manifest" if episode_manifest else args.wall_policy,
+        "manifest_sha256": manifest_digest(episode_manifest) if episode_manifest else None,
     }
     if args.wall_policy == "dino":
         manifest["wall_policy_parameters"] = DINO_WALL_POLICY_PARAMETERS
@@ -174,17 +197,27 @@ def main(argv=None):
     try:
         for episode_index in range(args.start_index, end_index):
             path = args.output_dir / f"episode_{episode_index:04d}.pt"
+            assignment = episode_manifest["episodes"][episode_index] if episode_manifest else None
             if args.resume and path.is_file():
+                if assignment:
+                    saved = torch.load(path, map_location="cpu", weights_only=True)
+                    if (saved.get("manifest_sha256") != manifest["manifest_sha256"]
+                            or saved.get("seed") != assignment["seed"]
+                            or tuple(saved.get("wall_layout") or ()) != tuple(assignment["wall_layout"])):
+                        raise ValueError(f"Episode {episode_index} differs from episode manifest")
                 continue
             episode = collect_episode(
                 adapter, config, episode_index, args.steps_per_episode,
-                args.base_seed + episode_index, args.wall_policy,
+                assignment["seed"] if assignment else args.base_seed + episode_index,
+                assignment["collection_policy"] if assignment else args.wall_policy,
+                layout=assignment["wall_layout"] if assignment else None,
+                manifest_sha256=manifest["manifest_sha256"],
             )
             temporary = path.with_suffix(".tmp")
             torch.save(episode, temporary)
             temporary.replace(path)
             if (episode_index + 1) % 10 == 0 or episode_index + 1 == end_index:
-                print(f"Saved through episode {episode_index + 1}/{args.num_episodes} ({args.env})")
+                print(f"Saved through episode {episode_index + 1}/{num_episodes} ({args.env})")
     finally:
         adapter.close()
 

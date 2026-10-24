@@ -133,12 +133,15 @@ class WallAdapter:
         )[0].permute(1, 2, 0).cpu().numpy()
         return _frame(image)
 
-    def reset(self, seed):
+    def reset(self, seed, layout=None):
         random.seed(seed)
         layouts = self.config.wall_layouts or [[
             self.config.wall_location, self.config.door_location
         ]]
-        self.layout = tuple(layouts[seed % len(layouts)])
+        self.layout = tuple(layout) if layout is not None else tuple(layouts[seed % len(layouts)])
+        if (len(self.layout) != 2 or not 20 <= self.layout[0] <= 44
+                or not 10 <= self.layout[1] <= 54):
+            raise ValueError(f"Invalid Wall layout: {self.layout}")
         self._make_environment(*self.layout, seed)
         self.env.seed(seed)
         start, goal = self.env.generate_random_state(seed)
