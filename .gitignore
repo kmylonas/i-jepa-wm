@@ -43,3 +43,4 @@ src/mylonas_ijepa_wm/wall
 !tests/test_mylonas_ijepa_compare_encoder_goal_geometry.py
 !tests/test_mylonas_ijepa_maze_transfer_collisions.py
 !tests/test_mylonas_ijepa_multi_environment.py
+!tests/test_dino_wall_matched_planning.py

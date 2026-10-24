@@ -11,6 +11,37 @@ from src.mylonas_ijepa_wm.environment_adapters import create_adapter
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
 
 
+DINO_WALL_POLICY_PARAMETERS = {
+    "angle_noise": 0.2,
+    "length_mean": 1.0,
+    "length_std": 0.4,
+    "length_min": 0.2,
+    "length_max": 1.8,
+    "component_clip": None,
+}
+
+
+def sample_dino_wall_actions(rng, steps):
+    """Sample a persistent random heading and truncated-normal action lengths."""
+    if steps < 1:
+        raise ValueError("steps must be positive")
+    initial_angle = rng.uniform(0.0, 2.0 * np.pi)
+    parameters = DINO_WALL_POLICY_PARAMETERS
+    turns = rng.vonmises(0.0, 1.0 / parameters["angle_noise"], size=steps - 1)
+    angles = initial_angle + np.concatenate(([0.0], np.cumsum(turns)))
+
+    mean, std = parameters["length_mean"], parameters["length_std"]
+    minimum, maximum = parameters["length_min"], parameters["length_max"]
+    lengths = rng.normal(mean, std, size=steps)
+    outside = (lengths < minimum) | (lengths > maximum)
+    while outside.any():
+        lengths[outside] = rng.normal(mean, std, size=outside.sum())
+        outside = (lengths < minimum) | (lengths > maximum)
+
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+    return (directions * lengths[:, None]).astype(np.float32)
+
+
 def wall_door_action(position, target, layout, action_low, action_high, rng):
     """Steer through the door to collect transitions on both sides of a wall."""
     position = np.asarray(position[:2], dtype=np.float32)
@@ -38,6 +69,13 @@ def collect_episode(adapter, config, episode_index, steps_per_episode, seed, wal
     use_door_policy = config.env == "wall" and (
         wall_policy == "door" or (wall_policy == "mixed" and episode_index % 2 == 1)
     )
+    use_dino_policy = config.env == "wall" and wall_policy == "dino"
+    dino_actions = sample_dino_wall_actions(rng, steps_per_episode) if use_dino_policy else None
+    collection_policy = "random"
+    if use_door_policy:
+        collection_policy = "door"
+    elif use_dino_policy:
+        collection_policy = "dino"
     destination = np.asarray(adapter.goal, dtype=np.float32).copy()
     start_position = np.asarray(initial.state[:2], dtype=np.float32).copy()
     for step_index in range(steps_per_episode):
@@ -48,6 +86,8 @@ def collect_episode(adapter, config, episode_index, steps_per_episode, seed, wal
                 states[-1], destination, adapter.layout,
                 adapter.action_low, adapter.action_high, rng,
             )
+        elif use_dino_policy:
+            action = dino_actions[step_index]
         else:
             action = rng.uniform(adapter.action_low, adapter.action_high).astype(np.float32)
         outcome = adapter.step(action)
@@ -66,7 +106,10 @@ def collect_episode(adapter, config, episode_index, steps_per_episode, seed, wal
         "environment": config.env,
         "environment_config": config.portable_metadata(),
         "wall_layout": getattr(adapter, "layout", None),
-        "collection_policy": "door" if use_door_policy else "random",
+        "collection_policy": collection_policy,
+        "collection_policy_parameters": (
+            DINO_WALL_POLICY_PARAMETERS if use_dino_policy else None
+        ),
         "state_fields": config.state_fields,
         "actions_per_model_step": config.actions_per_model_step,
         "physics_frame_skip": (
@@ -87,8 +130,8 @@ def parse_args(argv=None):
     parser.add_argument("--steps-per-episode", type=int, default=100)
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument(
-        "--wall-policy", choices=["random", "mixed", "door"], default="random",
-        help="Wall exploration policy; mixed uses random and doorway-directed episodes.",
+        "--wall-policy", choices=["random", "mixed", "door", "dino"], default="random",
+        help="Wall exploration policy; dino uses persistent random headings and variable action lengths.",
     )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args(argv)
@@ -116,6 +159,8 @@ def main(argv=None):
         "state_fields": config.state_fields,
         "wall_policy": args.wall_policy,
     }
+    if args.wall_policy == "dino":
+        manifest["wall_policy_parameters"] = DINO_WALL_POLICY_PARAMETERS
     manifest_path = args.output_dir / "metadata.json"
     existing = list(args.output_dir.glob("episode_*.pt"))
     if existing and not args.resume:

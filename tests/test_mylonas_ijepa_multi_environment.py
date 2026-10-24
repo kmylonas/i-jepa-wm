@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -54,6 +55,79 @@ class FakeWall:
 
 
 class MultiEnvironmentTest(unittest.TestCase):
+    def test_dino_wall_actions_have_truncated_lengths_and_persistent_directions(self):
+        actions = generate_episodes.sample_dino_wall_actions(
+            np.random.default_rng(12), 300
+        )
+        lengths = np.linalg.norm(actions, axis=1)
+        headings = np.arctan2(actions[:, 1], actions[:, 0])
+        self.assertEqual(actions.shape, (300, 2))
+        self.assertTrue(np.all((lengths >= 0.2) & (lengths <= 1.8)))
+        self.assertGreater(float(np.abs(actions).max()), 1.0)
+        self.assertGreater(float(np.cos(np.diff(headings)).mean()), 0.7)
+
+    def test_dino_wall_policy_is_recorded_in_raw_episode_and_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(generate_episodes, "create_adapter", return_value=FakeWall()):
+                generate_episodes.main([
+                    "--env", "wall", "--output-dir", directory,
+                    "--num-episodes", "1", "--steps-per-episode", "50",
+                    "--wall-policy", "dino",
+                ])
+            root = Path(directory)
+            episode = torch.load(root / "episode_0000.pt", weights_only=True)
+            self.assertEqual(episode["collection_policy"], "dino")
+            self.assertEqual(episode["actions"].shape, (50, 2))
+            self.assertEqual(episode["frames"].shape[0], 51)
+            self.assertEqual(episode["states"].shape[0], 51)
+            manifest = json.loads((root / "metadata.json").read_text())
+            self.assertEqual(manifest["wall_policy"], "dino")
+            self.assertEqual(
+                episode["collection_policy_parameters"], manifest["wall_policy_parameters"]
+            )
+            self.assertEqual(manifest["wall_policy_parameters"]["length_max"], 1.8)
+            self.assertIsNone(manifest["wall_policy_parameters"]["component_clip"])
+            embed_frames.process_episode(
+                episode, TinyEncoder(), torch.device("cpu"), "episode_0000",
+                root / "cache", environment="wall", actions_per_model_step=5,
+                embedding_frame_stride=1, encoder_batch_size=8,
+            )
+            trajectory = torch.load(
+                root / "cache/trajectories/episode_0000.pt", weights_only=True,
+            )
+            self.assertEqual(
+                trajectory["collection_policy_parameters"], manifest["wall_policy_parameters"]
+            )
+
+    def test_unbounded_wall_planning_can_execute_actions_above_training_limit(self):
+        class ActionSumModel(torch.nn.Module):
+            num_hist = 1
+
+            def forward(self, latents, states, actions):
+                predicted = states.clone()
+                predicted[:, -1, :] += actions[:, -1].reshape(-1, 2, 2).sum(dim=1)
+                return latents, predicted
+
+        adapter = FakeWall()
+        adapter.goal = np.array([5., 0.], dtype=np.float32)
+        config = EnvironmentConfig(env="wall", actions_per_model_step=2)
+        metadata = {
+            "state_mean": torch.zeros(2), "state_std": torch.ones(2),
+            "action_mean": None, "action_std": None,
+        }
+        args = argparse.Namespace(
+            cost="position", max_macro_steps=1, planning_horizon=1,
+            actions_per_plan=1, population=256, num_elites=32,
+            cem_iterations=5, candidate_batch_size=64, min_std=0.05,
+            unbounded_actions=True,
+        )
+        with patch.object(plan_proprio.visual, "encode_frame", return_value=torch.zeros(1, 1)):
+            record = plan_proprio.run_episode(
+                adapter, config, object(), ActionSumModel(), metadata, args,
+                torch.device("cpu"), "fp32", 7, None,
+            )
+        self.assertGreater(np.abs(record["macro_actions"]).max(), 1.0)
+
     def test_collector_can_fill_a_dataset_in_ranges(self):
         with tempfile.TemporaryDirectory() as directory:
             common = [

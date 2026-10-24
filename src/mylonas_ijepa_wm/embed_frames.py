@@ -137,6 +137,7 @@ def process_episode(
         "environment_config": episode.get("environment_config", {}),
         "wall_layout": episode.get("wall_layout"),
         "collection_policy": episode.get("collection_policy"),
+        "collection_policy_parameters": episode.get("collection_policy_parameters"),
         "state_fields": tuple(episode.get("state_fields", ("x", "y", "vx", "vy"))),
         "actions_per_model_step": stride,
         "embedding_frame_stride": embedding_stride,

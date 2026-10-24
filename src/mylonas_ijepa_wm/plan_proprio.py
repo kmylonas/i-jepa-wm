@@ -34,6 +34,10 @@ def parse_args(argv=None):
     parser.add_argument("--cem-iterations", type=int, default=5)
     parser.add_argument("--candidate-batch-size", type=int, default=64)
     parser.add_argument("--min-std", type=float, default=0.05)
+    parser.add_argument(
+        "--unbounded-actions", action="store_true",
+        help="Let Wall CEM search beyond the action range used during training.",
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--precision", choices=["auto", "fp32", "bf16"], default="auto")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
@@ -56,6 +60,9 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
     action_history = torch.zeros(num_hist - 1, config.macro_action_dim, device=device)
     low = torch.as_tensor(np.tile(adapter.action_low, config.actions_per_model_step))
     high = torch.as_tensor(np.tile(adapter.action_high, config.actions_per_model_step))
+    if getattr(args, "unbounded_actions", False):
+        low = torch.full_like(low, -torch.inf)
+        high = torch.full_like(high, torch.inf)
     initial_distance = float(np.linalg.norm(initial.state[:2] - adapter.goal))
     positions = [initial.state[:2].tolist()]
     states = [initial.state.tolist()]
@@ -136,6 +143,8 @@ def main(argv=None):
         raise ValueError("planning counts must be positive")
     if args.actions_per_plan > args.planning_horizon or args.num_elites > args.population:
         raise ValueError("invalid CEM planning configuration")
+    if args.unbounded_actions and args.env != "wall":
+        raise ValueError("--unbounded-actions is only supported for Wall")
     device = wm.resolve_device(args.device)
     precision = wm.resolve_precision(args.precision, device)
     model, metadata, epoch = wm_proprio.load_model_and_metadata(
@@ -192,6 +201,7 @@ def main(argv=None):
             "cost": args.cost,
             "planning_horizon": args.planning_horizon,
             "actions_per_plan": args.actions_per_plan,
+            "unbounded_actions": args.unbounded_actions,
         },
         "summary": visual.summarize_results(records),
         "episodes": records,
