@@ -21,6 +21,13 @@ DINO_WALL_POLICY_PARAMETERS = {
     "component_clip": None,
 }
 
+WIDE_WALL_POLICY_PARAMETERS = {
+    "angle_noise": 0.2,
+    "length_distribution": "uniform",
+    "length_min": 0.2,
+    "length_max": 3.5,
+}
+
 
 def sample_dino_wall_actions(rng, steps):
     """Sample a persistent random heading and truncated-normal action lengths."""
@@ -39,6 +46,23 @@ def sample_dino_wall_actions(rng, steps):
         lengths[outside] = rng.normal(mean, std, size=outside.sum())
         outside = (lengths < minimum) | (lengths > maximum)
 
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+    return (directions * lengths[:, None]).astype(np.float32)
+
+
+def sample_wide_wall_actions(rng, steps):
+    """Keep DINO-like heading persistence while covering the full action range."""
+    if steps < 1:
+        raise ValueError("steps must be positive")
+    initial_angle = rng.uniform(0.0, 2.0 * np.pi)
+    turns = rng.vonmises(
+        0.0, 1.0 / WIDE_WALL_POLICY_PARAMETERS["angle_noise"], size=steps - 1,
+    )
+    angles = initial_angle + np.concatenate(([0.0], np.cumsum(turns)))
+    lengths = rng.uniform(
+        WIDE_WALL_POLICY_PARAMETERS["length_min"],
+        WIDE_WALL_POLICY_PARAMETERS["length_max"], size=steps,
+    )
     directions = np.column_stack((np.cos(angles), np.sin(angles)))
     return (directions * lengths[:, None]).astype(np.float32)
 
@@ -74,14 +98,16 @@ def collect_episode(
         wall_policy == "door" or (wall_policy == "mixed" and episode_index % 2 == 1)
     )
     use_dino_policy = config.env == "wall" and wall_policy == "dino"
-    if wall_policy == "wide":
-        raise NotImplementedError("wide Wall policy is added in the coverage-audit task")
+    use_wide_policy = config.env == "wall" and wall_policy == "wide"
     dino_actions = sample_dino_wall_actions(rng, steps_per_episode) if use_dino_policy else None
+    wide_actions = sample_wide_wall_actions(rng, steps_per_episode) if use_wide_policy else None
     collection_policy = "random"
     if use_door_policy:
         collection_policy = "door"
     elif use_dino_policy:
         collection_policy = "dino"
+    elif use_wide_policy:
+        collection_policy = "wide"
     destination = np.asarray(adapter.goal, dtype=np.float32).copy()
     start_position = np.asarray(initial.state[:2], dtype=np.float32).copy()
     for step_index in range(steps_per_episode):
@@ -94,6 +120,8 @@ def collect_episode(
             )
         elif use_dino_policy:
             action = dino_actions[step_index]
+        elif use_wide_policy:
+            action = wide_actions[step_index]
         else:
             action = rng.uniform(adapter.action_low, adapter.action_high).astype(np.float32)
         outcome = adapter.step(action)
@@ -115,7 +143,8 @@ def collect_episode(
         "wall_layout": getattr(adapter, "layout", None),
         "collection_policy": collection_policy,
         "collection_policy_parameters": (
-            DINO_WALL_POLICY_PARAMETERS if use_dino_policy else None
+            DINO_WALL_POLICY_PARAMETERS if use_dino_policy else
+            WIDE_WALL_POLICY_PARAMETERS if use_wide_policy else None
         ),
         "state_fields": config.state_fields,
         "actions_per_model_step": config.actions_per_model_step,
@@ -137,8 +166,8 @@ def parse_args(argv=None):
     parser.add_argument("--steps-per-episode", type=int, default=100)
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument(
-        "--wall-policy", choices=["random", "mixed", "door", "dino"], default="random",
-        help="Wall exploration policy; dino uses persistent random headings and variable action lengths.",
+        "--wall-policy", choices=["random", "mixed", "door", "dino", "wide"], default="random",
+        help="Wall exploration policy; wide uses correlated headings and action lengths up to 3.5.",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--episode-manifest", type=Path,
@@ -184,6 +213,8 @@ def main(argv=None):
     }
     if args.wall_policy == "dino":
         manifest["wall_policy_parameters"] = DINO_WALL_POLICY_PARAMETERS
+    elif args.wall_policy == "wide":
+        manifest["wall_policy_parameters"] = WIDE_WALL_POLICY_PARAMETERS
     manifest_path = args.output_dir / "metadata.json"
     existing = list(args.output_dir.glob("episode_*.pt"))
     if existing and not args.resume:
