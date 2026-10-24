@@ -8,6 +8,7 @@ import time
 import torch
 
 from src.mylonas_ijepa_wm import wm, wm_proprio
+from src.mylonas_ijepa_wm.audit_wall_dataset import classify_transition
 
 
 def parse_args(argv=None):
@@ -22,6 +23,8 @@ def parse_args(argv=None):
         default=wm_proprio.DEFAULT_CACHE / "trajectories",
     )
     parser.add_argument("--split", choices=["train", "val", "test"], default="test")
+    parser.add_argument("--by-wall-layout", action="store_true",
+                        help="Report separate rollout and collision-event metrics for each Wall layout.")
     parser.add_argument("--horizon", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -32,6 +35,54 @@ def parse_args(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plot-output", type=Path)
     return parser.parse_args(argv)
+
+
+def group_episode_ids_by_wall_layout(episode_ids, trajectory_dir):
+    groups = {}
+    for episode_id in episode_ids:
+        trajectory = torch.load(
+            Path(trajectory_dir) / f"episode_{episode_id:04d}.pt",
+            map_location="cpu", weights_only=True,
+        )
+        layout = trajectory.get("wall_layout")
+        if layout is None:
+            raise ValueError(f"Episode {episode_id} has no Wall layout")
+        key = f"{layout[0]},{layout[1]}"
+        groups.setdefault(key, []).append(episode_id)
+    return groups
+
+
+def transition_subset_indices(dataset, trajectory_dir):
+    """Find rollout windows containing real wall contacts or door crossings."""
+    subsets = {"solid_contact": [], "door_crossing": []}
+    cache = {}
+    for sample_index, (episode_id, start) in enumerate(dataset.samples):
+        if episode_id not in cache:
+            trajectory = torch.load(
+                Path(trajectory_dir) / f"episode_{episode_id:04d}.pt",
+                map_location="cpu", weights_only=True,
+            )
+            layout = trajectory.get("wall_layout")
+            if layout is None:
+                raise ValueError(f"Episode {episode_id} has no Wall layout")
+            actions = trajectory["actions"].numpy()
+            states = trajectory["states"].numpy()
+            cache[episode_id] = [
+                classify_transition(states[i], actions[i], states[i + 1], layout)
+                for i in range(len(actions))
+            ]
+        labels = cache[episode_id]
+        model_stride = dataset.action_group_sizes[episode_id]
+        frame_step = dataset.model_frame_steps[episode_id]
+        embedding_stride = model_stride // frame_step
+        first_action = (start + (dataset.num_hist - 1) * frame_step) * embedding_stride
+        last_action = first_action + dataset.rollout_steps * model_stride
+        window = labels[first_action:last_action]
+        if "solid_contact" in window:
+            subsets["solid_contact"].append(sample_index)
+        if any(label.startswith("door_crossing_") for label in window):
+            subsets["door_crossing"].append(sample_index)
+    return {key: indices for key, indices in subsets.items() if indices}
 
 
 def teacher_forced_rollout(model, latent_window, state_window, actions, num_hist):
@@ -264,6 +315,49 @@ def main(argv=None):
         "num_hist": num_hist,
         "max_horizon": args.horizon,
     })
+    if args.by_wall_layout:
+        if metadata.get("environment") != "wall":
+            raise ValueError("--by-wall-layout requires a Wall checkpoint")
+        metrics["by_wall_layout"] = {}
+        groups = group_episode_ids_by_wall_layout(episode_ids, args.trajectory_dir)
+        for layout, group_ids in groups.items():
+            group_dataset = wm_proprio.ProprioWorldModelDataset(
+                latent_dir=args.latent_dir,
+                trajectory_dir=args.trajectory_dir,
+                episode_ids=group_ids,
+                num_hist=num_hist,
+                rollout_steps=args.horizon,
+                action_mean=action_mean,
+                action_std=action_std,
+                state_mean=metadata["state_mean"],
+                state_std=metadata["state_std"],
+            )
+            group_loader = torch.utils.data.DataLoader(
+                group_dataset, batch_size=args.batch_size, shuffle=False,
+                num_workers=args.num_workers, pin_memory=device.type == "cuda",
+                persistent_workers=args.num_workers > 0,
+            )
+            group_metrics = evaluate_model(
+                model, group_loader, device, num_hist, precision=precision,
+                proprio_loss_weight=proprio_loss_weight,
+            )
+            group_metrics["num_episodes"] = len(group_ids)
+            group_metrics["episode_ids"] = group_ids
+            group_metrics["transition_subsets"] = {}
+            for category, indices in transition_subset_indices(
+                group_dataset, args.trajectory_dir,
+            ).items():
+                subset_loader = torch.utils.data.DataLoader(
+                    torch.utils.data.Subset(group_dataset, indices),
+                    batch_size=args.batch_size, shuffle=False,
+                    num_workers=args.num_workers, pin_memory=device.type == "cuda",
+                    persistent_workers=args.num_workers > 0,
+                )
+                group_metrics["transition_subsets"][category] = evaluate_model(
+                    model, subset_loader, device, num_hist, precision=precision,
+                    proprio_loss_weight=proprio_loss_weight,
+                )
+            metrics["by_wall_layout"][layout] = group_metrics
     output_path = args.output or args.checkpoint.parent / f"rollout_{args.split}_h{args.horizon}_metrics.json"
     plot_path = args.plot_output or output_path.with_suffix(".png")
     output_path.parent.mkdir(parents=True, exist_ok=True)

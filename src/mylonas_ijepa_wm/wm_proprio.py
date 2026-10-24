@@ -10,6 +10,7 @@ import torch
 from src.mylonas_ijepa_wm import wm
 from src.mylonas_ijepa_wm.proprio_vit import ProprioViT
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
+from src.mylonas_ijepa_wm.wall_layout_manifest import load_manifest, manifest_digest, validate_manifest
 
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -58,6 +59,8 @@ def parse_args(argv=None):
     parser.add_argument("--latent-dir", type=Path, default=DEFAULT_CACHE / "latents")
     parser.add_argument("--env", choices=["pointmaze", "wall"], default="pointmaze")
     parser.add_argument("--env-config", type=Path)
+    parser.add_argument("--episode-manifest", type=Path,
+                        help="Use disjoint Wall layout splits from this manifest instead of random episode splits.")
     parser.add_argument("--trajectory-dir", type=Path, default=DEFAULT_CACHE / "trajectories")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--num-episodes", type=int, default=2000)
@@ -348,6 +351,10 @@ def run_epoch(
 
 
 def validate_checkpoint_metadata(saved, current, include_objective=True):
+    if saved.get("experiment_manifest_sha256") != current.get("experiment_manifest_sha256"):
+        raise ValueError("Current episode manifest does not match the checkpoint")
+    if saved.get("layout_splits") != current.get("layout_splits"):
+        raise ValueError("Current layout splits do not match the checkpoint")
     wm.validate_checkpoint_metadata(saved, current, include_objective)
     if saved.get("environment", "pointmaze") != current.get("environment", "pointmaze"):
         raise ValueError("Current environment does not match the checkpoint")
@@ -384,6 +391,25 @@ def load_model_and_metadata(checkpoint_path, device):
     return model, metadata, checkpoint["epoch"]
 
 
+def episode_ids_by_split(manifest: dict, trajectory_dir: Path) -> tuple[list[int], list[int], list[int]]:
+    """Resolve layout-disjoint IDs and reject cache files from another dataset."""
+    manifest = validate_manifest(manifest)
+    digest = manifest_digest(manifest)
+    ids = {"train": [], "val": [], "test": []}
+    for entry in manifest["episodes"]:
+        episode_id = entry["episode_id"]
+        path = Path(trajectory_dir) / f"episode_{episode_id:04d}.pt"
+        if not path.is_file():
+            raise FileNotFoundError(f"Episode {episode_id} trajectory not found: {path}")
+        trajectory = torch.load(path, map_location="cpu", weights_only=True)
+        if (trajectory.get("seed") != entry["seed"]
+                or tuple(trajectory.get("wall_layout") or ()) != tuple(entry["wall_layout"])
+                or trajectory.get("manifest_sha256") != digest):
+            raise ValueError(f"Episode {episode_id} trajectory disagrees with episode manifest")
+        ids[entry["split"]].append(episode_id)
+    return ids["train"], ids["val"], ids["test"]
+
+
 def main(argv=None):
     args = parse_args(argv)
     config = load_environment_config(args.env, args.env_config)
@@ -401,13 +427,27 @@ def main(argv=None):
     precision = wm.resolve_precision(args.precision, device)
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
-    train_ids, val_ids, test_ids = wm.create_episode_splits(
-        args.num_episodes,
-        args.train_episodes,
-        args.val_episodes,
-        args.test_episodes,
-        args.seed,
-    )
+    episode_manifest = load_manifest(args.episode_manifest) if args.episode_manifest else None
+    if episode_manifest is not None:
+        if args.env != "wall":
+            raise ValueError("--episode-manifest requires --env wall")
+        expected_layouts = {
+            tuple(layout) for split in ("train", "val", "test")
+            for layout in episode_manifest[f"{split}_layouts"]
+        }
+        if {tuple(layout) for layout in config.wall_layouts or []} != expected_layouts:
+            raise ValueError("Environment config layouts disagree with episode manifest")
+        train_ids, val_ids, test_ids = episode_ids_by_split(
+            episode_manifest, args.trajectory_dir,
+        )
+    else:
+        train_ids, val_ids, test_ids = wm.create_episode_splits(
+            args.num_episodes,
+            args.train_episodes,
+            args.val_episodes,
+            args.test_episodes,
+            args.seed,
+        )
     physics_frame_skip = read_physics_frame_skip(
         args.trajectory_dir, [*train_ids, *val_ids, *test_ids]
     )
@@ -503,6 +543,13 @@ def main(argv=None):
         model_type=MODEL_TYPE,
         environment=args.env,
         environment_config=config.portable_metadata(),
+        experiment_manifest_sha256=(
+            manifest_digest(episode_manifest) if episode_manifest else None
+        ),
+        layout_splits=(
+            {split: episode_manifest[f"{split}_layouts"] for split in ("train", "val", "test")}
+            if episode_manifest else None
+        ),
         actions_per_model_step=config.actions_per_model_step,
         embedding_frame_stride=train_dataset.cache_timing[1],
         camera="topdown",

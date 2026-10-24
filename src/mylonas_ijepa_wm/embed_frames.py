@@ -136,6 +136,8 @@ def process_episode(
         "environment": episode_env,
         "environment_config": episode.get("environment_config", {}),
         "wall_layout": episode.get("wall_layout"),
+        "seed": episode.get("seed"),
+        "manifest_sha256": episode.get("manifest_sha256"),
         "collection_policy": episode.get("collection_policy"),
         "collection_policy_parameters": episode.get("collection_policy_parameters"),
         "state_fields": tuple(episode.get("state_fields", ("x", "y", "vx", "vy"))),
@@ -232,6 +234,15 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def validate_cached_episode_identity(raw, cached, episode_name):
+    if raw.get("manifest_sha256") is None:
+        return
+    if (cached.get("manifest_sha256") != raw["manifest_sha256"]
+            or cached.get("seed") != raw.get("seed")
+            or tuple(cached.get("wall_layout") or ()) != tuple(raw.get("wall_layout") or ())):
+        raise ValueError(f"{episode_name} cached trajectory differs from episode manifest")
+
+
 def main():
     args = parse_args()
     config = load_environment_config(args.env, args.env_config)
@@ -294,29 +305,27 @@ def main():
         latent_path = latent_directory / f"{episode_name}.npy"
         trajectory_path = trajectory_directory / f"{episode_name}.pt"
 
+        if not episode_path.is_file():
+            raise FileNotFoundError(f"Episode not found: {episode_path}")
+        episode = torch.load(
+            episode_path, map_location="cpu", weights_only=True,
+        )
+        if episode.get("environment_config") and episode["environment_config"] != config.portable_metadata():
+            raise ValueError(f"{episode_name} environment settings differ from --env-config")
+
         if args.resume and latent_path.exists() and trajectory_path.exists():
             saved = torch.load(trajectory_path, map_location="cpu", weights_only=True)
+            validate_cached_episode_identity(episode, saved, episode_name)
             expected_stride = args.embedding_frame_stride or config.actions_per_model_step
             if int(saved.get("embedding_frame_stride", saved.get("actions_per_model_step", frame_skip))) != expected_stride:
                 raise ValueError(f"{episode_name} was embedded with a different frame stride")
             print(f"Skipping completed {episode_name}")
             continue
 
-        if not episode_path.is_file():
-            raise FileNotFoundError(f"Episode not found: {episode_path}")
-
         print(
             f"Processing {episode_name} "
             f"({i - args.start_index + 1}/{args.end_index - args.start_index})"
         )
-
-        episode = torch.load(
-            episode_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        if episode.get("environment_config") and episode["environment_config"] != config.portable_metadata():
-            raise ValueError(f"{episode_name} environment settings differ from --env-config")
 
         process_episode(
             episode=episode,
