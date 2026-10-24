@@ -15,6 +15,7 @@ tests/*
 
 # Generated results
 ijepa_cache/
+.worktrees/
 src/mylonas_ijepa_wm/position_probe_runs/
 *.npy
 
