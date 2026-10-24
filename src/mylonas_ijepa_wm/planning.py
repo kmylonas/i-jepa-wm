@@ -277,6 +277,7 @@ def cem_optimize(
     num_iterations,
     min_std=0.05,
     generator=None,
+    candidate_transform=None,
 ):
     _validate_cem_arguments(
         horizon=horizon,
@@ -320,6 +321,8 @@ def cem_optimize(
             torch.minimum(candidates, action_high),
             action_low,
         )
+        if candidate_transform is not None:
+            candidates = candidate_transform(candidates)
         costs = score_fn(candidates)
         if costs.shape != (population,):
             raise ValueError(

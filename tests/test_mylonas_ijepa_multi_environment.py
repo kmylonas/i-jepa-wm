@@ -1,4 +1,6 @@
 import argparse
+from contextlib import redirect_stderr
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -127,6 +129,54 @@ class MultiEnvironmentTest(unittest.TestCase):
                 torch.device("cpu"), "fp32", 7, None,
             )
         self.assertGreater(np.abs(record["macro_actions"]).max(), 1.0)
+
+    def test_wall_planning_limits_each_executed_action_length(self):
+        class ActionSumModel(torch.nn.Module):
+            num_hist = 1
+
+            def forward(self, latents, states, actions):
+                predicted = states.clone()
+                predicted[:, -1, :] += actions[:, -1].reshape(-1, 2, 2).sum(dim=1)
+                return latents, predicted
+
+        args = plan_proprio.parse_args([
+            "--env", "wall", "--world-model-checkpoint", "unused.pt",
+            "--output", "unused.json", "--cost", "position",
+            "--unbounded-actions", "--max-action-length", "0.7",
+            "--max-macro-steps", "1", "--planning-horizon", "1",
+            "--population", "256", "--num-elites", "32",
+            "--cem-iterations", "5", "--candidate-batch-size", "64",
+        ])
+        adapter = FakeWall()
+        adapter.goal = np.array([5., 0.], dtype=np.float32)
+        config = EnvironmentConfig(env="wall", actions_per_model_step=2)
+        metadata = {
+            "state_mean": torch.zeros(2), "state_std": torch.ones(2),
+            "action_mean": None, "action_std": None,
+        }
+        with patch.object(plan_proprio.visual, "encode_frame", return_value=torch.zeros(1, 1)):
+            record = plan_proprio.run_episode(
+                adapter, config, object(), ActionSumModel(), metadata, args,
+                torch.device("cpu"), "fp32", 7, None,
+            )
+
+        lengths = np.linalg.norm(np.asarray(record["macro_actions"]).reshape(-1, 2), axis=1)
+        self.assertLessEqual(float(lengths.max()), 0.700001)
+        self.assertGreater(float(lengths.max()), 0.5)
+        self.assertAlmostEqual(
+            record["final_planner_cost"], record["final_goal_distance"], places=5,
+        )
+
+    def test_action_length_limit_must_be_positive_and_finite(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr), self.assertRaises(SystemExit):
+                    plan_proprio.parse_args([
+                        "--world-model-checkpoint", "unused.pt", "--output", "unused.json",
+                        "--max-action-length", value,
+                    ])
+                self.assertIn("positive finite", stderr.getvalue())
 
     def test_collector_can_fill_a_dataset_in_ranges(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -150,6 +150,8 @@ def plan_action(
     goal_position=None,
     state_mean=None,
     state_std=None,
+    max_action_length=None,
+    micro_action_dim=2,
 ):
     if cost not in {"latent", "position"}:
         raise ValueError(f"unknown cost mode: {cost}")
@@ -159,6 +161,17 @@ def plan_action(
         value is None for value in (goal_position, state_mean, state_std)
     ):
         raise ValueError("position cost requires goal_position, state_mean, and state_std")
+    if max_action_length is not None:
+        if not np.isfinite(max_action_length) or max_action_length <= 0:
+            raise ValueError("max_action_length must be positive and finite")
+        if action_history.shape[-1] % micro_action_dim:
+            raise ValueError("macro action dimension must be divisible by micro_action_dim")
+
+    def limit_action_lengths(candidates):
+        vectors = candidates.reshape(*candidates.shape[:-1], -1, micro_action_dim)
+        lengths = torch.linalg.vector_norm(vectors, dim=-1, keepdim=True)
+        scale = (max_action_length / lengths.clamp_min(1e-12)).clamp(max=1.0)
+        return (vectors * scale).reshape_as(candidates)
 
     def score_candidates(candidates):
         costs = []
@@ -202,6 +215,7 @@ def plan_action(
         num_iterations=num_iterations,
         min_std=min_std,
         generator=generator,
+        candidate_transform=limit_action_lengths if max_action_length is not None else None,
     )
 
 

@@ -1,6 +1,7 @@
 """CEM planning with a proprioceptive world model in a selected environment."""
 
 import argparse
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +13,16 @@ from src.mylonas_ijepa_wm import plan_pointmaze_proprio as planner
 from src.mylonas_ijepa_wm import wm, wm_proprio
 from src.mylonas_ijepa_wm.environment_adapters import create_adapter
 from src.mylonas_ijepa_wm.environment_configs import EnvironmentConfig, load_environment_config
+
+
+def positive_finite_float(value):
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a positive finite number") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("expected a positive finite number")
+    return number
 
 
 def parse_args(argv=None):
@@ -37,6 +48,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "--unbounded-actions", action="store_true",
         help="Let Wall CEM search beyond the action range used during training.",
+    )
+    parser.add_argument(
+        "--max-action-length", type=positive_finite_float,
+        help="Maximum Euclidean length of each 2D environment action proposed by CEM.",
     )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--precision", choices=["auto", "fp32", "bf16"], default="auto")
@@ -88,6 +103,8 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
             min_std=args.min_std, generator=rng, cost=args.cost,
             goal_position=torch.as_tensor(adapter.goal, device=device),
             state_mean=state_mean, state_std=state_std,
+            max_action_length=getattr(args, "max_action_length", None),
+            micro_action_dim=config.micro_action_dim,
         )
         for macro in plan.action_sequence[:min(args.actions_per_plan, args.max_macro_steps - len(actions))]:
             macro = macro.detach().cpu().numpy().astype(np.float32)
@@ -202,6 +219,7 @@ def main(argv=None):
             "planning_horizon": args.planning_horizon,
             "actions_per_plan": args.actions_per_plan,
             "unbounded_actions": args.unbounded_actions,
+            "max_action_length": args.max_action_length,
         },
         "summary": visual.summarize_results(records),
         "episodes": records,
