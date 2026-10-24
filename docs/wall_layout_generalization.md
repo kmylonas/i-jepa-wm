@@ -54,6 +54,25 @@ Inspect each layout's solid contacts, doorway crossings in both directions,
 and wide-policy actions above 1.8 and 3.0. Pilot counts are diagnostic; the
 full-data thresholds below are not expected from ten episodes per layout.
 
+### Local pilot result (October 24, 2026)
+
+The local 150-episode pilot collected successfully and used about 1.1 GB for
+raw files. Across the nine training layouts it recorded 360 solid-wall
+contact transitions, 53 left-to-right and 66 right-to-left doorway crossings,
+and 348 wide-policy actions longer than 3.0. The `[40, 42]` training layout
+had zero solid contacts in its ten pilot episodes. A separate, unsaved
+100-episode wide-policy replay at `[40, 42]` with seeds 1000–1099 found
+contacts in 64 episodes (939 contact transitions), indicating the ten-episode
+zero was sampling variance. The doorway policy contributed zero solid-wall
+contacts in that replay, as expected from its steering objective. The full
+dataset must still pass its own coverage audit before embedding.
+
+A six-frame smoke sample from pilot episode 0 embedded on local MPS using
+the frozen I-JEPA checkpoint. Its tokens were `(6, 256, 1280)` float16;
+the trajectory sidecar contained six aligned `(x, y)` states, frame indices
+`0..5`, the seed, and the manifest hash. This verifies alignment, not WM
+training or held-out performance.
+
 ## Full collection and embedding
 
 ```bash
@@ -93,6 +112,13 @@ filesystem overhead; raw RGB frames are roughly 20 GB. Ensure storage is
 available. The embedder validates manifest identity and frame stride when it
 resumes. Raw batches can be removed after a successful full audit and their
 latent files and trajectory sidecars have been verified.
+
+The local Mac has MPS but no CUDA, so the full training and planning matrix
+were not run here. Local verification passed 213 tests and 16 subtests after
+excluding four unrelated legacy test modules that need `torchvision` or a
+different package import path in this Python environment. All nine relevant
+CLI `--help` checks passed. The remaining test warning concerns unavailable
+GLFW initialization in a camera test.
 
 ## Train and inspect predictions
 
