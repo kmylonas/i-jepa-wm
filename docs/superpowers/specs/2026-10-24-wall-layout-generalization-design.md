@@ -28,10 +28,14 @@ position after each execution batch.
   `[wall_x, door_y]`, and split. The configuration and manifest must be saved
   with the run. All stages validate them. Train, validation, and test layouts
   are disjoint. Normalization statistics use training episodes only.
-- Use a collector alternating the existing DINO-like correlated random
-  policy and the existing doorway-directed policy within each layout. The
-  latter uses geometry only to collect data; no layout coordinates enter the
-  world model. Keep collection policy and action distribution recorded.
+- Use a collector alternating a correlated random-heading policy with
+  primitive action lengths distributed across `[0.2, 3.5]` and the existing
+  doorway-directed policy within each layout. The wide random policy must
+  actually sample the upper part of that interval, rather than merely raise
+  a truncation bound on a narrow distribution. The doorway policy uses
+  geometry only to collect data; no layout coordinates enter the world
+  model. Record each policy and its action distribution. Preserve the
+  existing DINO-like `[0.2, 1.8]` policy for older runs.
 - Preserve the existing episode-random split as the default for older runs;
   require an explicit layout manifest for this experiment.
 
@@ -59,7 +63,8 @@ models at planning time.
 ## Data and coverage gate
 
 Before embedding the full dataset, a read-only audit of raw episodes reports,
-per layout and policy: episode count, action-length distribution, attempts
+per layout and policy: episode count, action-length distribution (including
+counts above 1.8, above 3.0, and up to 3.5), attempts
 to push through solid wall, successful doorway crossings, direction of
 crossings, and contacts with outer borders. The audit compares observed
 motion with DotWall's `position + 2 * action` proposal and checks the known
@@ -112,11 +117,14 @@ weights with the same architecture and one-step objective as `wall_fixed_3`.
    start–goal seeds for the multi-layout model and the fixed-layout
    checkpoint. Save each layout's JSON and videos for failures. Use horizon 5,
    five macro actions per plan, population 300, 30 elites, ten CEM
-   iterations, and at most 20 macro steps. The primary run caps each
-   primitive action's Euclidean length at 1.8, matching collection support;
-   a labelled secondary run may use 3.5 to compare with the recent
-   fixed-layout planner setting. Report success count, confidence interval,
-   final distance, and failure type per layout, not only a pooled percentage.
+   iterations, and at most 20 macro steps. Run three action-search modes for
+   each model/layout/seed combination: unbounded, Euclidean primitive-action
+   length capped at 4.0, and length capped at the maximum training length of
+   3.5. The latter two modes must remove the adapter's per-component box
+   bound before applying the Euclidean norm cap. Report success count,
+   confidence interval, final distance, and failure type per layout and
+   action-search mode, not only a pooled percentage. Clearly label the
+   4.0 and unbounded modes as beyond the training action support.
 4. **Sanity checks:** Plan on two training layouts with the same seed set,
    and verify that planning records carry the actual `[wall_x, door_y]`.
 
@@ -142,5 +150,5 @@ mechanism claim.
   defaults.
 - The 2,000/200/400 episode budget keeps training volume near the fixed
   baseline while giving 100 held-out trajectories per layout.
-- The 1.8 action cap is primary to reduce planner extrapolation; 3.5 is a
-  secondary comparison with the recent fixed-layout setting.
+- The three requested planning modes share all settings and start–goal seeds;
+  3.5 is the in-support reference and 4.0/unbounded probe extrapolation.
