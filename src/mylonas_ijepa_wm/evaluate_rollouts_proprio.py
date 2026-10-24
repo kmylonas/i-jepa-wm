@@ -37,8 +37,11 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def group_episode_ids_by_wall_layout(episode_ids, trajectory_dir):
+def group_episode_ids_by_wall_layout(
+    episode_ids, trajectory_dir, expected_manifest_sha256=None, allowed_layouts=None,
+):
     groups = {}
+    allowed = None if allowed_layouts is None else {tuple(layout) for layout in allowed_layouts}
     for episode_id in episode_ids:
         trajectory = torch.load(
             Path(trajectory_dir) / f"episode_{episode_id:04d}.pt",
@@ -47,13 +50,18 @@ def group_episode_ids_by_wall_layout(episode_ids, trajectory_dir):
         layout = trajectory.get("wall_layout")
         if layout is None:
             raise ValueError(f"Episode {episode_id} has no Wall layout")
+        if (expected_manifest_sha256 is not None
+                and trajectory.get("manifest_sha256") != expected_manifest_sha256):
+            raise ValueError(f"Episode {episode_id} manifest identity differs from checkpoint")
+        if allowed is not None and tuple(layout) not in allowed:
+            raise ValueError(f"Episode {episode_id} layout is outside checkpoint split")
         key = f"{layout[0]},{layout[1]}"
         groups.setdefault(key, []).append(episode_id)
     return groups
 
 
 def transition_subset_indices(dataset, trajectory_dir):
-    """Find rollout windows containing real wall contacts or door crossings."""
+    """Find rollout windows whose first predicted macro step contains the event."""
     subsets = {"solid_contact": [], "door_crossing": []}
     cache = {}
     for sample_index, (episode_id, start) in enumerate(dataset.samples):
@@ -76,7 +84,7 @@ def transition_subset_indices(dataset, trajectory_dir):
         frame_step = dataset.model_frame_steps[episode_id]
         embedding_stride = model_stride // frame_step
         first_action = (start + (dataset.num_hist - 1) * frame_step) * embedding_stride
-        last_action = first_action + dataset.rollout_steps * model_stride
+        last_action = first_action + model_stride
         window = labels[first_action:last_action]
         if "solid_contact" in window:
             subsets["solid_contact"].append(sample_index)
@@ -319,7 +327,11 @@ def main(argv=None):
         if metadata.get("environment") != "wall":
             raise ValueError("--by-wall-layout requires a Wall checkpoint")
         metrics["by_wall_layout"] = {}
-        groups = group_episode_ids_by_wall_layout(episode_ids, args.trajectory_dir)
+        groups = group_episode_ids_by_wall_layout(
+            episode_ids, args.trajectory_dir,
+            expected_manifest_sha256=metadata.get("experiment_manifest_sha256"),
+            allowed_layouts=(metadata.get("layout_splits") or {}).get(args.split),
+        )
         for layout, group_ids in groups.items():
             group_dataset = wm_proprio.ProprioWorldModelDataset(
                 latent_dir=args.latent_dir,
@@ -344,6 +356,10 @@ def main(argv=None):
             group_metrics["num_episodes"] = len(group_ids)
             group_metrics["episode_ids"] = group_ids
             group_metrics["transition_subsets"] = {}
+            group_metrics["transition_subset_definition"] = (
+                "The first predicted macro step contains a real contact or doorway crossing; "
+                "later horizons measure rollout after that event."
+            )
             for category, indices in transition_subset_indices(
                 group_dataset, args.trajectory_dir,
             ).items():

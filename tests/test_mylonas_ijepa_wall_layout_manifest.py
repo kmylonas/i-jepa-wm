@@ -11,6 +11,14 @@ from src.mylonas_ijepa_wm.environment_adapters import StepResult, WallAdapter
 from src.mylonas_ijepa_wm.environment_configs import EnvironmentConfig
 
 
+def _replace_test_layout(manifest, replacement):
+    original = manifest["test_layouts"][0]
+    manifest["test_layouts"][0] = replacement
+    for episode in manifest["episodes"]:
+        if episode["wall_layout"] == original:
+            episode["wall_layout"] = replacement
+
+
 def test_prepare_manifest_balances_disjoint_layouts_and_policies():
     from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
 
@@ -47,6 +55,9 @@ def test_prepare_manifest_balances_disjoint_layouts_and_policies():
     lambda m: m["episodes"][1].update(episode_id=0),
     lambda m: m["episodes"][1].update(episode_id=3),
     lambda m: m["test_layouts"].append([24, 18]),
+    lambda m: _replace_test_layout(m, [24, 22]),
+    lambda m: _replace_test_layout(m, [26, 18]),
+    lambda m: _replace_test_layout(m, [28, 22]),
     lambda m: m["episodes"][0].update(wall_layout=[20, 10]),
 ])
 def test_load_manifest_rejects_corrupt_assignments(tmp_path, mutation):
@@ -58,6 +69,28 @@ def test_load_manifest_rejects_corrupt_assignments(tmp_path, mutation):
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError):
         load_manifest(path)
+
+
+def test_checkpoint_manifest_identity_requires_matching_layouts_and_ids():
+    from src.mylonas_ijepa_wm.wall_layout_manifest import (
+        manifest_digest, prepare_manifest, validate_checkpoint_manifest,
+    )
+
+    manifest = prepare_manifest(train_episodes=90, val_episodes=20, test_episodes=40)
+    metadata = {
+        "environment": "wall",
+        "experiment_manifest_sha256": manifest_digest(manifest),
+        "layout_splits": {split: manifest[f"{split}_layouts"] for split in ("train", "val", "test")},
+        **{f"{split}_ids": [entry["episode_id"] for entry in manifest["episodes"]
+                            if entry["split"] == split] for split in ("train", "val", "test")},
+    }
+    validate_checkpoint_manifest(metadata, manifest)
+    with pytest.raises(ValueError, match="manifest"):
+        validate_checkpoint_manifest({**metadata, "experiment_manifest_sha256": "other"}, manifest)
+    with pytest.raises(ValueError, match="layout"):
+        validate_checkpoint_manifest({**metadata, "layout_splits": None}, manifest)
+    with pytest.raises(ValueError, match="IDs"):
+        validate_checkpoint_manifest({**metadata, "test_ids": []}, manifest)
 
 
 def test_wall_adapter_explicit_layout_overrides_seed_selection():

@@ -63,6 +63,47 @@ def test_wilson_interval_and_matrix_summary_use_each_layout_separately():
         summarize_run(payload, [38, 38], [10, 11])
 
 
+def test_planning_resume_rejects_stale_action_mode_and_search_settings(tmp_path):
+    from src.mylonas_ijepa_wm.run_wall_planning_matrix import (
+        build_invocations, expected_run_configuration, validate_planning_result,
+    )
+
+    manifest = prepare_manifest(train_episodes=90, val_episodes=20, test_episodes=40)
+    config_path = tmp_path / "layout.json"
+    config_path.write_text("{}")
+    configs = {tuple(layout): config_path for layout in manifest["test_layouts"]}
+    item = next(run for run in build_invocations(
+        manifest, configs, tmp_path, Path("encoder.pt"), Path("multi.pt"), Path("fixed.pt"),
+        base_seed=10, num_episodes=1,
+    ) if run["mode"] == "cap_train")
+    expected = expected_run_configuration(item)
+    payload = {
+        "configuration": expected,
+        "episodes": [{"seed": 10, "wall_layout": item["layout"], "success": True,
+                      "final_goal_distance": 0.0}],
+    }
+    validate_planning_result(payload, item, [10])
+    for key, stale_value in (("max_action_length", 4.0), ("population", 64),
+                             ("encoder_checkpoint", "other.pt")):
+        stale = {**payload, "configuration": {**expected, key: stale_value}}
+        with pytest.raises(ValueError, match="configuration"):
+            validate_planning_result(stale, item, [10])
+
+
+def test_matrix_rejects_multi_checkpoint_from_other_manifest_before_planning(tmp_path):
+    from src.mylonas_ijepa_wm.run_wall_planning_matrix import run_matrix
+
+    manifest = prepare_manifest(train_episodes=90, val_episodes=20, test_episodes=40)
+    checkpoint = tmp_path / "other.pt"
+    torch.save({"metadata": {"environment": "wall", "experiment_manifest_sha256": "other"}}, checkpoint)
+    config_path = tmp_path / "env.json"
+    config_path.write_text("{}")
+    with pytest.raises(ValueError, match="manifest"):
+        run_matrix(manifest, config_path, tmp_path / "output", Path("encoder.pt"),
+                   checkpoint, Path("fixed.pt"), num_episodes=1)
+    assert not (tmp_path / "output").exists()
+
+
 def test_planning_record_contains_actual_wall_layout(monkeypatch):
     class FakeModel(torch.nn.Module):
         num_hist = 1

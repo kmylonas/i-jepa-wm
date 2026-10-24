@@ -32,6 +32,8 @@ def validate_manifest(manifest: dict) -> dict:
         raise ValueError("Unsupported wall layout manifest schema")
     layouts_by_split = {}
     seen_layouts = set()
+    seen_wall_positions = set()
+    seen_door_positions = set()
     for split in SPLITS:
         layouts = manifest.get(f"{split}_layouts")
         if not isinstance(layouts, list) or not layouts:
@@ -39,12 +41,19 @@ def validate_manifest(manifest: dict) -> dict:
         values = [_validate_layout(layout) for layout in layouts]
         if len(set(values)) != len(values) or seen_layouts.intersection(values):
             raise ValueError("Wall layouts must be unique and disjoint across splits")
+        wall_positions = {wall_x for wall_x, _ in values}
+        door_positions = {door_y for _, door_y in values}
+        if seen_wall_positions.intersection(wall_positions) or seen_door_positions.intersection(door_positions):
+            raise ValueError("Wall and doorway coordinates must be unseen across splits")
         layouts_by_split[split] = set(values)
         seen_layouts.update(values)
+        seen_wall_positions.update(wall_positions)
+        seen_door_positions.update(door_positions)
     entries = manifest.get("episodes")
     if not isinstance(entries, list) or not entries:
         raise ValueError("Manifest episodes must be nonempty")
     counts = {split: 0 for split in SPLITS}
+    assigned_layouts = {split: set() for split in SPLITS}
     seeds = set()
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or entry.get("episode_id") != index:
@@ -61,15 +70,35 @@ def validate_manifest(manifest: dict) -> dict:
         if entry.get("collection_policy") not in {"wide", "door"}:
             raise ValueError(f"Episode {index} has invalid collection policy")
         counts[split] += 1
+        assigned_layouts[split].add(tuple(entry["wall_layout"]))
     if any(value == 0 for value in counts.values()):
         raise ValueError("Every split must contain episodes")
     if manifest.get("episode_counts") != counts:
         raise ValueError("Manifest episode counts disagree with assignments")
+    if any(assigned_layouts[split] != layouts_by_split[split] for split in SPLITS):
+        raise ValueError("Every declared layout must have assigned episodes")
     if manifest.get("steps_per_episode") != 50:
         raise ValueError("Wall layout experiment requires 50 primitive actions per episode")
     if manifest.get("max_training_action_length") != 3.5:
         raise ValueError("Wall layout experiment training action maximum must be 3.5")
     return manifest
+
+
+def validate_checkpoint_manifest(metadata: dict, manifest: dict) -> None:
+    """Reject evaluation with a model trained on different episode assignments."""
+    manifest = validate_manifest(manifest)
+    if metadata.get("environment") != "wall":
+        raise ValueError("Checkpoint is not a Wall model")
+    if metadata.get("experiment_manifest_sha256") != manifest_digest(manifest):
+        raise ValueError("Checkpoint manifest identity differs from evaluation manifest")
+    expected_layouts = {split: manifest[f"{split}_layouts"] for split in SPLITS}
+    if metadata.get("layout_splits") != expected_layouts:
+        raise ValueError("Checkpoint layout splits differ from evaluation manifest")
+    for split in SPLITS:
+        expected_ids = [entry["episode_id"] for entry in manifest["episodes"]
+                        if entry["split"] == split]
+        if metadata.get(f"{split}_ids") != expected_ids:
+            raise ValueError(f"Checkpoint {split} IDs differ from evaluation manifest")
 
 
 def prepare_manifest(

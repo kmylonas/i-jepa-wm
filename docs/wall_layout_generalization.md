@@ -114,7 +114,7 @@ resumes. Raw batches can be removed after a successful full audit and their
 latent files and trajectory sidecars have been verified.
 
 The local Mac has MPS but no CUDA, so the full training and planning matrix
-were not run here. Local verification passed 213 tests and 16 subtests after
+were not run here. Local verification passed 221 tests and 16 subtests after
 excluding four unrelated legacy test modules that need `torchvision` or a
 different package import path in this Python environment. All nine relevant
 CLI `--help` checks passed. The remaining test warning concerns unavailable
@@ -144,8 +144,10 @@ python -m src.mylonas_ijepa_wm.evaluate_wall_collision_probes \
   --output "$RUN_DIR/heldout_collision_probes.json" --device cuda
 ```
 
-Read state and token error per horizon and layout, including solid-contact
-and doorway-crossing windows. In collision probes, compare predicted with
+Read state and token error per horizon and layout, including rollouts whose
+first predicted macro step contains a solid contact or doorway crossing.
+Later horizons in those subsets measure prediction after that event. In
+collision probes, compare predicted with
 actual crossing at the new wall, through its door, and through an old
 training-wall coordinate that is now open. Success in planning alone does
 not establish that the model follows the visible geometry.

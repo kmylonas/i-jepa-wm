@@ -113,8 +113,23 @@ def test_rollout_helpers_group_layouts_and_contact_windows(tmp_path):
     sidecar["actions"] = torch.tensor(actions)
     torch.save(sidecar, path)
     dataset = SimpleNamespace(
-        samples=[(0, 0), (0, 10), (0, 30)], num_hist=1,
+        samples=[(0, 0), (0, 10), (0, 15), (0, 30)], num_hist=1,
         rollout_steps=2, model_frame_steps={0: 5}, action_group_sizes={0: 5},
     )
     subsets = evaluate_rollouts_proprio.transition_subset_indices(dataset, tmp_path)
-    assert subsets == {"solid_contact": [0], "door_crossing": [1]}
+    assert subsets == {"solid_contact": [0], "door_crossing": [2]}
+
+
+def test_rollout_layout_group_rejects_sidecar_from_another_manifest(tmp_path):
+    manifest = _manifest()
+    _sidecars(tmp_path, manifest)
+    with pytest.raises(ValueError, match="manifest"):
+        evaluate_rollouts_proprio.group_episode_ids_by_wall_layout(
+            [2], tmp_path, expected_manifest_sha256="other",
+            allowed_layouts=manifest["test_layouts"],
+        )
+    with pytest.raises(ValueError, match="layout"):
+        evaluate_rollouts_proprio.group_episode_ids_by_wall_layout(
+            [2], tmp_path, expected_manifest_sha256=manifest_digest(manifest),
+            allowed_layouts=manifest["val_layouts"],
+        )

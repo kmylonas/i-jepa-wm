@@ -7,6 +7,7 @@ import torch
 
 from src.mylonas_ijepa_wm.environment_adapters import WallAdapter
 from src.mylonas_ijepa_wm.environment_configs import EnvironmentConfig
+from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
 
 
 def _dino_source():
@@ -100,3 +101,25 @@ def test_probe_prediction_denormalizes_state_and_records_crossing(monkeypatch):
     assert record["predicted_crossed"]
     assert record["actual_crossed"]
     assert record["token_mse"] == 0.0
+
+
+def test_probes_reject_checkpoint_from_other_manifest_before_encoding(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_collision_probes as probes
+
+    config_path = tmp_path / "environment.json"
+    config_path.write_text('{"env": "wall"}')
+    monkeypatch.setattr(
+        probes.wm_proprio, "load_model_and_metadata",
+        lambda *args: (type("Model", (), {"num_hist": 1})(),
+                       {"environment": "wall", "experiment_manifest_sha256": "other"}, 0),
+    )
+    monkeypatch.setattr(
+        probes.visual, "load_frozen_ijepa_encoder",
+        lambda *args: pytest.fail("encoder should not load for mismatched manifest"),
+    )
+    with pytest.raises(ValueError, match="manifest"):
+        probes.evaluate_probes(
+            tmp_path / "checkpoint.pt", tmp_path / "encoder.pt",
+            prepare_manifest(train_episodes=90, val_episodes=20, test_episodes=40),
+            [10], tmp_path / "probes.json", config_path, device_name="cpu",
+        )

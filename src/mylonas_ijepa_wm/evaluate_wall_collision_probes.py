@@ -11,7 +11,7 @@ from src.mylonas_ijepa_wm import plan_pointmaze as visual
 from src.mylonas_ijepa_wm import wm, wm_proprio
 from src.mylonas_ijepa_wm.environment_adapters import create_adapter
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
-from src.mylonas_ijepa_wm.wall_layout_manifest import load_manifest
+from src.mylonas_ijepa_wm.wall_layout_manifest import load_manifest, validate_checkpoint_manifest
 
 
 def build_probes(layout: tuple[int, int]) -> list[dict]:
@@ -102,7 +102,7 @@ def evaluate_single_probe(
 
 
 def evaluate_probes(
-    checkpoint: Path, encoder_checkpoint: Path, layouts: list,
+    checkpoint: Path, encoder_checkpoint: Path, manifest: dict,
     seeds: list[int], output: Path, env_config: Path,
     device_name: str = "auto", precision_name: str = "auto",
 ) -> dict:
@@ -110,11 +110,13 @@ def evaluate_probes(
     device = wm.resolve_device(device_name)
     precision = wm.resolve_precision(precision_name, device)
     model, metadata, epoch = wm_proprio.load_model_and_metadata(checkpoint, device)
+    validate_checkpoint_manifest(metadata, manifest)
     if metadata.get("environment") != "wall" or model.num_hist != 1:
         raise ValueError("Collision probes require a one-history Wall checkpoint")
     encoder = visual.load_frozen_ijepa_encoder(encoder_checkpoint, device)
     adapter = create_adapter(config, max_micro_steps=5)
     records = []
+    layouts = manifest["test_layouts"]
     try:
         for layout in layouts:
             for seed in seeds:
@@ -166,7 +168,7 @@ def main(argv=None):
         raise ValueError("num-seeds must be positive")
     manifest = load_manifest(args.episode_manifest)
     evaluate_probes(
-        args.checkpoint, args.encoder_checkpoint, manifest["test_layouts"],
+        args.checkpoint, args.encoder_checkpoint, manifest,
         list(range(args.base_seed, args.base_seed + args.num_seeds)),
         args.output, args.env_config, args.device, args.precision,
     )

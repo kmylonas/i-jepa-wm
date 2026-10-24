@@ -7,8 +7,12 @@ from pathlib import Path
 import subprocess
 import sys
 
+import torch
+
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
-from src.mylonas_ijepa_wm.wall_layout_manifest import load_manifest
+from src.mylonas_ijepa_wm.wall_layout_manifest import (
+    load_manifest, validate_checkpoint_manifest,
+)
 
 
 def wilson_interval(successes: int, episodes: int) -> tuple[float, float]:
@@ -100,12 +104,44 @@ def summarize_run(payload: dict, layout: list[int], expected_seeds: list[int]) -
     )
 
 
+def expected_run_configuration(item: dict) -> dict:
+    """Read the exact scientific settings requested for one planning run."""
+    from src.mylonas_ijepa_wm.plan_proprio import parse_args
+
+    args = parse_args(item["argv"])
+    return dict(
+        environment=load_environment_config(args.env, args.env_config).portable_metadata(),
+        checkpoint=str(args.world_model_checkpoint),
+        encoder_checkpoint=str(args.encoder_checkpoint),
+        cost=args.cost, num_episodes=args.num_episodes, base_seed=args.base_seed,
+        max_macro_steps=args.max_macro_steps, planning_horizon=args.planning_horizon,
+        actions_per_plan=args.actions_per_plan, population=args.population,
+        num_elites=args.num_elites, cem_iterations=args.cem_iterations,
+        candidate_batch_size=args.candidate_batch_size, min_std=args.min_std,
+        unbounded_actions=args.unbounded_actions,
+        max_action_length=args.max_action_length,
+    )
+
+
+def validate_planning_result(payload: dict, item: dict, expected_seeds: list[int]) -> dict:
+    expected = expected_run_configuration(item)
+    saved = payload.get("configuration", {})
+    mismatches = [key for key, value in expected.items() if saved.get(key) != value]
+    if mismatches:
+        raise ValueError(f"Planning result configuration differs for {mismatches}: {item['output']}")
+    return summarize_run(payload, item["layout"], expected_seeds)
+
+
 def run_matrix(
     manifest: dict, env_config: Path, output_root: Path,
     encoder_checkpoint: Path, multi_checkpoint: Path, fixed_checkpoint: Path,
     base_seed: int = 10000, num_episodes: int = 20,
     device: str = "auto", precision: str = "auto", resume: bool = False,
 ) -> dict:
+    multi_metadata = torch.load(
+        multi_checkpoint, map_location="cpu", weights_only=True,
+    ).get("metadata", {})
+    validate_checkpoint_manifest(multi_metadata, manifest)
     config = load_environment_config("wall", env_config)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -140,12 +176,10 @@ def run_matrix(
                 *item["argv"],
             ], check=True)
         payload = json.loads(path.read_text())
-        if payload.get("configuration", {}).get("checkpoint") != item["checkpoint"]:
-            raise ValueError(f"Planning result checkpoint differs: {path}")
         results.append({
             "model": item["model"], "mode": item["mode"],
             "wall_layout": item["layout"], "result_path": str(path),
-            **summarize_run(payload, item["layout"], expected_seeds),
+            **validate_planning_result(payload, item, expected_seeds),
         })
     summary = dict(
         base_seed=base_seed, num_episodes=num_episodes,
