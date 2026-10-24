@@ -15,6 +15,12 @@ position after each execution batch.
   rendering, two-dimensional state, five primitive actions per WM step,
   `num_hist=1`, and one-step WM training used by the strongest fixed-layout
   baseline.
+- Vary the wall's horizontal position (`wall_x`) and the doorway's vertical
+  position (`door_y`) independently. DotWall supports both through its fixed
+  layout parameters. Keep `wall_width=6` and `door_space=4` constant; the
+  current inclusive renderer makes their visible spans seven and nine
+  simulator-grid cells, respectively. This tests position generalization,
+  not a change in wall thickness or opening size.
 - Use 50 primitive actions per collected episode and embed every frame
   (`--embedding-frame-stride 1`). Train from scratch; do not initialize from
   the fixed-layout checkpoint.
@@ -33,6 +39,9 @@ position after each execution batch.
 
 The training grid is the Cartesian product of wall x positions
 `[24, 32, 40]` and door y positions `[18, 30, 42]` (nine layouts).
+Moving both coordinates is deliberate: keeping wall x fixed would leave
+the model free to rely on the familiar wall position exposed by the
+PointMaze transfer failure.
 Validation uses `[[28, 24], [36, 36]]`. Test uses
 `[[26, 22], [26, 38], [38, 22], [38, 38]]`. Every validation and test
 wall coordinate and door coordinate is absent from training; test coordinates
