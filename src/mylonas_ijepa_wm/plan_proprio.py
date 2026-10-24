@@ -136,6 +136,7 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
                 break
     return {
         "seed": seed, "environment": config.env, "cost_mode": args.cost,
+        "wall_layout": list(adapter.layout) if config.env == "wall" else None,
         "success": bool(success), "terminated": bool(terminated),
         "truncated": bool(truncated), "macro_steps": len(actions),
         "micro_steps": micro_steps,
