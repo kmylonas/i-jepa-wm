@@ -105,6 +105,66 @@ def evaluate_pair(adapter, encoder, model, metadata, pair, seed, device, precisi
     )
 
 
+def build_pair_figure(result: dict):
+    """Show true primitive paths and one-step predicted endpoints for a matched pair."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
+    for ax, case in zip(axes, result["cases"]):
+        wall_x, door_y = case["layout"]
+        for train_x in (24, 32, 40):
+            ax.axvline(train_x, color="#626b73", linestyle="--", linewidth=1.5,
+                       alpha=0.25, zorder=0, label="Training wall x")
+        for bottom, top in ((0, door_y - 4), (door_y + 4, 64)):
+            ax.add_patch(Rectangle(
+                (wall_x - 3, bottom), 6, top - bottom,
+                facecolor="#29343d", edgecolor="none", zorder=2,
+            ))
+        positions = np.asarray(case["actual_positions"], dtype=float)
+        ax.plot(positions[:, 0], positions[:, 1], color="#1678a7", linewidth=2.5,
+                marker="o", markersize=3.5, zorder=4, label="Actual trajectory")
+        ax.scatter(*positions[0], s=90, color="#101820", edgecolor="white",
+                   linewidth=1, zorder=5, label="Shared start")
+        ax.scatter(*case["predicted_final_position"], s=130, marker="X",
+                   color="#d4542d", edgecolor="white", linewidth=0.8,
+                   zorder=6, label="Predicted endpoint")
+        actual = "crossed" if case["actual_crossed"] else "blocked"
+        predicted = "crossed" if case["predicted_crossed"] else "blocked"
+        ax.set_title(f"Wall x={wall_x}, door y={door_y}\nActual: {actual} · WM: {predicted}")
+        ax.set_xlim(15, 49)
+        ax.set_ylim(54, 8)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x (environment units)")
+        ax.grid(alpha=0.13, zorder=0)
+    axes[0].set_ylabel("y (environment units)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    unique = {}
+    for handle, label in zip(handles, labels):
+        unique.setdefault(label, handle)
+    fig.legend(unique.values(), unique.keys(), loc="lower center", ncol=4,
+               frameon=False, bbox_to_anchor=(0.5, 0.015))
+    fig.suptitle(result["name"].replace("_", " "))
+    fig.text(0.5, 0.085,
+             "Dashed guides: training wall x positions. The WM predicts only the endpoint after five actions.",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, 0.13, 1, 0.93))
+    return fig
+
+
+def save_pair_figure(result: dict, output: Path) -> Path:
+    from matplotlib import pyplot as plt
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure = build_pair_figure(result)
+    try:
+        figure.savefig(output, dpi=170)
+    finally:
+        plt.close(figure)
+    return output
+
+
 def evaluate_pairs(
     checkpoint: Path, encoder_checkpoint: Path, manifest: dict,
     output: Path, env_config: Path, device_name: str = "auto",
@@ -147,6 +207,9 @@ def evaluate_pairs(
     )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    figure_dir = output.with_name(f"{output.stem}_figures")
+    for result in results:
+        result["figure_path"] = str(save_pair_figure(result, figure_dir / f"{result['name']}.png"))
     output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
 

@@ -179,3 +179,35 @@ transfer reference because its collection policy and training layouts differ.
 For a training-layout sanity check, run `plan_proprio` separately with a
 single-layout config for `[24, 18]` and `[40, 42]`, using the same seeds and
 the 3.5 cap. Keep these outputs separate from the held-out test matrix.
+
+## Test whether the model uses the visual layout
+
+The original collision probes change the agent's starting position with the
+probe location. The matched visual test holds its starting position and five
+actions fixed while changing the held-out wall or doorway layout. Four
+predeclared comparisons cover doorway and wall-position changes in both
+crossing directions. Their simulator outcomes must contrast; the command
+fails if a pair stops contrasting. The model receives no layout label.
+
+```bash
+python -m src.mylonas_ijepa_wm.evaluate_wall_visual_pairs \
+  --checkpoint "$RUN_DIR/best.pt" --encoder-checkpoint "$ENCODER" \
+  --episode-manifest "$MANIFEST" --env-config "$ENV_CONFIG" \
+  --output "$EXP_ROOT/results/visual_input_pairs.json" \
+  --device cuda --precision auto
+```
+
+On Colab, use the local encoder copy, `ENCODER_LOCAL`, and Drive paths for the
+checkpoint, manifest, environment config, and output. This command reads no
+episode caches. It saves four PNGs under `visual_input_pairs_figures/` next to
+the JSON. Each PNG has two panels with identical axes: the current wall and
+door opening, faint dashed guides for the training wall x positions 24, 32,
+and 40, the actual five-action ball trajectory, and the world model's single
+predicted endpoint. These guides indicate training wall *positions*; they do
+not claim that any one of the nine training layouts is present in the test
+scene. The JSON reports crossing agreement, endpoint error, and whether both
+contrasting cases in each pair were predicted correctly.
+
+Correct contrasting predictions with the same position and action support
+visual-input dependence in these cases. They do not establish that every
+layout feature is encoded or that planning always depends on the visual input.

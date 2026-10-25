@@ -80,3 +80,42 @@ def test_model_sees_same_state_and_actions_but_different_visual_tokens(monkeypat
     assert not torch.equal(model.inputs[0][0], model.inputs[1][0])
     assert [case["actual_crossed"] for case in record["cases"]] == [True, False]
     assert all(len(case["actual_positions"]) == 6 for case in record["cases"])
+
+
+def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_path):
+    import matplotlib.pyplot as plt
+    from src.mylonas_ijepa_wm.evaluate_wall_visual_pairs import (
+        build_pair_figure, save_pair_figure,
+    )
+
+    record = {
+        "name": "door_y22_left_to_right", "reference_x": 26,
+        "start": [21.0, 22.0], "actions": [[1.0, 0.0]] * 5,
+        "cases": [
+            {"layout": [26, 22], "actual_positions": [[21, 22], [22, 22],
+              [23, 22], [24, 22], [25, 22], [27, 22]],
+             "predicted_final_position": [26.5, 22.2],
+             "actual_crossed": True, "predicted_crossed": True},
+            {"layout": [26, 38], "actual_positions": [[21, 22], [22, 22],
+              [22.8, 22], [22.8, 22], [22.8, 22], [22.8, 22]],
+             "predicted_final_position": [22.5, 22.3],
+             "actual_crossed": False, "predicted_crossed": False},
+        ],
+    }
+    fig = build_pair_figure(record)
+    assert len(fig.axes) == 2
+    for ax, case in zip(fig.axes, record["cases"]):
+        paths = [line for line in ax.lines if line.get_label() == "Actual trajectory"]
+        assert len(paths) == 1
+        assert list(paths[0].get_xdata()) == [p[0] for p in case["actual_positions"]]
+        predicted = [item for item in ax.collections if item.get_label() == "Predicted endpoint"]
+        assert len(predicted) == 1
+        assert predicted[0].get_offsets()[0].tolist() == case["predicted_final_position"]
+        guides = [line for line in ax.lines if line.get_label() == "Training wall x"]
+        assert [line.get_xdata()[0] for line in guides] == [24, 32, 40]
+        assert all(line.get_alpha() < 0.5 for line in guides)
+        assert len(ax.patches) == 2
+    plt.close(fig)
+    path = tmp_path / "nested" / "comparison.png"
+    save_pair_figure(record, path)
+    assert path.is_file() and path.stat().st_size > 10_000
