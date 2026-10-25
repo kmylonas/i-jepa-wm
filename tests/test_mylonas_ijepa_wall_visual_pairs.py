@@ -147,7 +147,7 @@ def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_
     fig = build_pair_figure(record)
     assert len(fig.axes) == 2
     for ax, case in zip(fig.axes, record["cases"]):
-        assert "Crossed test line x=26" in ax.get_title()
+        assert "Test x=26:" in ax.get_title()
         reference = [line for line in ax.lines if line.get_label() == "Virtual test line x=26"]
         assert len(reference) == 1
         assert reference[0].get_xdata()[0] == 26

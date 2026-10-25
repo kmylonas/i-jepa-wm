@@ -154,8 +154,8 @@ def build_pair_figure(result: dict):
                    zorder=6, label="Predicted endpoint")
         actual = "yes" if case["actual_crossed"] else "no"
         predicted = "yes" if case["predicted_crossed"] else "no"
-        ax.set_title(f"Wall x={wall_x}, door y={door_y}\n"
-                     f"Crossed test line x={result['reference_x']}: actual {actual} · WM {predicted}")
+        ax.set_title(f"Wall x={wall_x} · Door y={door_y}\n"
+                     f"Test x={result['reference_x']}: real {actual} · WM {predicted}")
         ax.set_xlim(*x_limits)
         ax.set_ylim(*y_limits)
         ax.set_aspect("equal", adjustable="box")
