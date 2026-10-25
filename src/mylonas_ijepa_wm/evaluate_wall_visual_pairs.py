@@ -12,7 +12,7 @@ from src.mylonas_ijepa_wm import wm, wm_proprio
 from src.mylonas_ijepa_wm.environment_adapters import create_adapter
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
 from src.mylonas_ijepa_wm.wall_layout_manifest import (
-    TRAIN_LAYOUTS, load_manifest, validate_checkpoint_manifest,
+    TRAIN_LAYOUTS, load_manifest, validate_checkpoint_manifest, validate_manifest,
 )
 
 
@@ -122,14 +122,15 @@ def build_pair_figure(result: dict):
     # DotWall renders pixels 0..64. Expand only if a prediction leaves the frame.
     x_limits = (min(-0.5, min(x_values) - 2), max(64.5, max(x_values) + 2))
     y_limits = (max(64.5, max(y_values) + 2), min(-0.5, min(y_values) - 2))
-    train_doors = sorted({door_y for _, door_y in TRAIN_LAYOUTS})
+    training_layouts = result.get("training_layouts", TRAIN_LAYOUTS)
+    train_doors = sorted({door_y for _, door_y in training_layouts})
     rail_offsets = {
         door_y: (index - (len(train_doors) - 1) / 2) * 0.9
         for index, door_y in enumerate(train_doors)
     }
     for ax, case in zip(axes, result["cases"]):
         wall_x, door_y = case["layout"]
-        for train_x, train_door_y in TRAIN_LAYOUTS:
+        for train_x, train_door_y in training_layouts:
             rail_x = train_x + rail_offsets[train_door_y]
             for bottom, top in ((0, train_door_y - 4), (train_door_y + 4, 64)):
                 ax.plot([rail_x, rail_x], [bottom, top], color="#859443",
@@ -169,9 +170,13 @@ def build_pair_figure(result: dict):
     fig.legend(unique.values(), unique.keys(), loc="lower center", ncol=6,
                frameon=False, bbox_to_anchor=(0.5, 0.025))
     fig.suptitle(result["name"].replace("_", " "))
-    fig.text(0.5, 0.145,
-             "Faint rails show nine separate training layouts; rails at each x are offset for visibility.",
-             ha="center", fontsize=9)
+    training_note = (
+        f"Faint dashed rail shows the fixed training wall x={training_layouts[0][0]}, "
+        f"door y={training_layouts[0][1]}."
+        if len(training_layouts) == 1 else
+        "Faint rails show nine separate training layouts; rails at each x are offset for visibility."
+    )
+    fig.text(0.5, 0.145, training_note, ha="center", fontsize=9)
     fig.text(0.5, 0.12,
              "Purple test line is a scoring threshold, not a wall. The WM predicts only the endpoint after five actions.",
              ha="center", fontsize=9)
@@ -193,21 +198,46 @@ def save_pair_figure(result: dict, output: Path) -> Path:
 
 
 def evaluate_pairs(
-    checkpoint: Path, encoder_checkpoint: Path, manifest: dict,
+    checkpoint: Path, encoder_checkpoint: Path, manifest: dict | None,
     output: Path, env_config: Path, device_name: str = "auto",
     precision_name: str = "auto", seed: int = 10000,
+    checkpoint_role: str = "multi",
 ) -> dict:
+    if checkpoint_role not in {"multi", "fixed"}:
+        raise ValueError(f"Unsupported checkpoint role: {checkpoint_role}")
     config = load_environment_config("wall", env_config)
     device = wm.resolve_device(device_name)
     precision = wm.resolve_precision(precision_name, device)
     model, metadata, epoch = wm_proprio.load_model_and_metadata(checkpoint, device)
-    validate_checkpoint_manifest(metadata, manifest)
     if metadata.get("environment") != "wall" or model.num_hist != 1:
         raise ValueError("Visual pairs require a one-history Wall checkpoint")
     pairs = build_matched_pairs()
-    test_layouts = {tuple(layout) for layout in manifest["test_layouts"]}
-    if any(tuple(layout) not in test_layouts for pair in pairs for layout in pair["layouts"]):
-        raise ValueError("A visual pair layout is outside the held-out test split")
+    if checkpoint_role == "multi":
+        if manifest is None:
+            raise ValueError("Multi-layout checkpoint requires an episode manifest")
+        validate_checkpoint_manifest(metadata, manifest)
+        training_layouts = [list(layout) for layout in manifest["train_layouts"]]
+    else:
+        fixed_config = metadata.get("environment_config") or {}
+        if (fixed_config.get("wall_layouts") is not None
+                or metadata.get("camera") != "topdown"
+                or tuple(metadata.get("proprio_fields", ())) != ("x", "y")
+                or metadata.get("actions_per_model_step") != 5):
+            raise ValueError("Fixed checkpoint must be a single-layout top-down Wall model")
+        training_layout = [fixed_config.get("wall_location"), fixed_config.get("door_location")]
+        if not all(type(coordinate) is int for coordinate in training_layout):
+            raise ValueError("Fixed checkpoint lacks its training wall and door coordinates")
+        training_layouts = [training_layout]
+    if manifest is not None:
+        validate_manifest(manifest)
+        test_layouts = {tuple(layout) for layout in manifest["test_layouts"]}
+        if any(tuple(layout) not in test_layouts for pair in pairs for layout in pair["layouts"]):
+            raise ValueError("A visual pair layout is outside the held-out test split")
+    if checkpoint_role == "fixed":
+        train_x, train_y = training_layouts[0]
+        if any(wall_x == train_x or door_y == train_y
+               for pair in pairs for wall_x, door_y in pair["layouts"]):
+            raise ValueError("Visual pair wall and door coordinates must be unseen by the fixed checkpoint")
     if config.actions_per_model_step != 5:
         raise ValueError("Visual pairs require five actions per model step")
     encoder = visual.load_frozen_ijepa_encoder(encoder_checkpoint, device)
@@ -219,9 +249,12 @@ def evaluate_pairs(
         ]
     finally:
         adapter.close()
+    for result in results:
+        result["training_layouts"] = training_layouts
     cases = [case for result in results for case in result["cases"]]
     payload = dict(
         checkpoint=str(checkpoint), checkpoint_epoch=epoch,
+        checkpoint_role=checkpoint_role, training_layouts=training_layouts,
         encoder_checkpoint=str(encoder_checkpoint), seed=seed,
         summary=dict(
             pairs=len(results), cases=len(cases),
@@ -245,7 +278,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--encoder-checkpoint", type=Path, required=True)
-    parser.add_argument("--episode-manifest", type=Path, required=True)
+    parser.add_argument("--episode-manifest", type=Path,
+                        help="Required for multi-layout checkpoints; optional for fixed checkpoints")
+    parser.add_argument("--checkpoint-role", choices=["multi", "fixed"], default="multi")
     parser.add_argument("--env-config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=10000)
@@ -253,8 +288,10 @@ def main(argv=None):
     parser.add_argument("--precision", choices=["auto", "fp32", "bf16"], default="auto")
     args = parser.parse_args(argv)
     result = evaluate_pairs(
-        args.checkpoint, args.encoder_checkpoint, load_manifest(args.episode_manifest),
+        args.checkpoint, args.encoder_checkpoint,
+        load_manifest(args.episode_manifest) if args.episode_manifest else None,
         args.output, args.env_config, args.device, args.precision, args.seed,
+        args.checkpoint_role,
     )
     print(json.dumps(result["summary"], indent=2))
     print(f"Saved visual pairs to {args.output}")

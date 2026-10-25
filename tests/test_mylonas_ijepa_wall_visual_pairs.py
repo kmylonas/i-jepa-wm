@@ -124,6 +124,69 @@ def test_rejects_other_manifest_before_loading_encoder(tmp_path, monkeypatch):
         )
 
 
+def test_fixed_checkpoint_uses_its_own_training_layout_without_multi_manifest(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
+
+    config = tmp_path / "environment.json"
+    config.write_text('{"env": "wall"}')
+    metadata = {
+        "environment": "wall", "camera": "topdown", "actions_per_model_step": 5,
+        "proprio_fields": ("x", "y"),
+        "environment_config": {
+            "wall_location": 32, "door_location": 30, "wall_layouts": None,
+        },
+    }
+    monkeypatch.setattr(
+        visual_pairs.wm_proprio, "load_model_and_metadata",
+        lambda *args: (type("Model", (), {"num_hist": 1})(), metadata, 22),
+    )
+    monkeypatch.setattr(visual_pairs.visual, "load_frozen_ijepa_encoder", lambda *args: object())
+    monkeypatch.setattr(visual_pairs, "create_adapter", lambda *args, **kwargs: type(
+        "Adapter", (), {"close": lambda self: None},
+    )())
+    monkeypatch.setattr(visual_pairs, "evaluate_pair", lambda *args: {
+        "name": args[4]["name"], "predicted_contrast": True, "both_correct": True,
+        "cases": [{"position_error": 0.0, "predicted_crossed": True, "actual_crossed": True}],
+    })
+    monkeypatch.setattr(visual_pairs, "save_pair_figure", lambda record, path: path)
+
+    result = visual_pairs.evaluate_pairs(
+        tmp_path / "checkpoint.pt", tmp_path / "encoder.pt", None,
+        tmp_path / "fixed.json", config, "cpu", "fp32", checkpoint_role="fixed",
+    )
+    assert result["checkpoint_role"] == "fixed"
+    assert result["training_layouts"] == [[32, 30]]
+    assert len(result["pairs"]) == 4
+    assert all(pair["training_layouts"] == [[32, 30]] for pair in result["pairs"])
+
+
+def test_fixed_checkpoint_rejects_a_seen_test_coordinate(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
+
+    config = tmp_path / "environment.json"
+    config.write_text('{"env": "wall"}')
+    metadata = {
+        "environment": "wall", "camera": "topdown", "actions_per_model_step": 5,
+        "proprio_fields": ("x", "y"),
+        "environment_config": {
+            "wall_location": 26, "door_location": 30, "wall_layouts": None,
+        },
+    }
+    monkeypatch.setattr(
+        visual_pairs.wm_proprio, "load_model_and_metadata",
+        lambda *args: (type("Model", (), {"num_hist": 1})(), metadata, 22),
+    )
+    monkeypatch.setattr(
+        visual_pairs.visual, "load_frozen_ijepa_encoder",
+        lambda *args: pytest.fail("encoder loaded before training-layout validation"),
+    )
+    with pytest.raises(ValueError, match="unseen"):
+        visual_pairs.evaluate_pairs(
+            tmp_path / "checkpoint.pt", tmp_path / "encoder.pt", None,
+            tmp_path / "fixed.json", config, "cpu", "fp32", checkpoint_role="fixed",
+        )
+
+
 def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_path):
     import matplotlib.pyplot as plt
     from src.mylonas_ijepa_wm.evaluate_wall_visual_pairs import (
@@ -181,3 +244,29 @@ def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_
     path = tmp_path / "nested" / "comparison.png"
     save_pair_figure(record, path)
     assert path.is_file() and path.stat().st_size > 10_000
+
+
+def test_fixed_figure_shows_one_training_wall_and_its_door():
+    import matplotlib.pyplot as plt
+    from src.mylonas_ijepa_wm.evaluate_wall_visual_pairs import build_pair_figure
+
+    record = {
+        "name": "door_y22_left_to_right", "reference_x": 26,
+        "training_layouts": [[32, 30]],
+        "cases": [
+            {"layout": [26, 22], "actual_positions": [[21, 22], [31, 22]],
+             "predicted_final_position": [30, 22],
+             "actual_crossed": True, "predicted_crossed": True},
+            {"layout": [26, 38], "actual_positions": [[21, 22], [23, 22]],
+             "predicted_final_position": [25, 22],
+             "actual_crossed": False, "predicted_crossed": False},
+        ],
+    }
+    fig = build_pair_figure(record)
+    for ax in fig.axes:
+        guides = [line for line in ax.lines if line.get_label() == "Training layout (faint)"]
+        assert len(guides) == 2
+        assert [tuple(line.get_ydata()) for line in guides] == [(0, 26), (34, 64)]
+        assert all(line.get_xdata()[0] == 32 for line in guides)
+    assert "fixed training wall" in fig.texts[-2].get_text()
+    plt.close(fig)

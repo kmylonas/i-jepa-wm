@@ -247,6 +247,42 @@ endpoint passes that x coordinate, which may differ from the current wall x.
 The JSON reports crossing agreement, endpoint error, and whether both
 contrasting cases in each pair were predicted correctly.
 
+### Compare the historical fixed-layout world model
+
+Use the same four predeclared pairs, starting states, and actions with the
+historical checkpoint trained only on wall x=32, door y=30. In fixed mode,
+the evaluator reads that training layout from the checkpoint metadata and
+requires both the wall and door coordinates in all probe cases to be unseen.
+It uses the checkpoint's own state and action normalization. The fixed
+checkpoint predates the multi-layout manifest, so it is not required to
+match that manifest's training episode IDs; supplying the manifest still
+checks that the probe layouts belong to its held-out test split.
+
+In Colab after the setup cells above:
+
+```python
+fixed_checkpoint = Path(
+    "/content/drive/MyDrive/datasets/wall_fixed_v3/world_model_runs/k1/best.pt"
+)
+assert fixed_checkpoint.is_file()
+fixed_output = RESULTS_DIR / "fixed_visual_input_pairs.json"
+subprocess.run([
+    sys.executable, "-u", "-m", "src.mylonas_ijepa_wm.evaluate_wall_visual_pairs",
+    "--checkpoint", str(fixed_checkpoint), "--checkpoint-role", "fixed",
+    "--encoder-checkpoint", str(ENCODER_LOCAL),
+    "--episode-manifest", str(MANIFEST),
+    "--env-config", str(local_config),
+    "--output", str(fixed_output),
+    "--device", "cuda", "--precision", "auto",
+], cwd=REPO, check=True)
+print(json.loads(fixed_output.read_text())["summary"])
+```
+
+The resulting PNGs use the same plotting style, with one faint training wall
+at x=32 and its door at y=30. Compare crossing decisions and position errors
+case by case with `visual_input_pairs.json`; these eight cases test specific
+visual contrasts, not overall collision accuracy across all possible states.
+
 If only the figure style changes, the saved JSON contains everything needed
 to redraw the PNGs without loading the encoder or world model. In Colab,
 update the repository and run:
