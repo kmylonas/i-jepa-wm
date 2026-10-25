@@ -34,6 +34,32 @@ def build_matched_pairs() -> list[dict]:
     ]
 
 
+def build_extreme_x_pairs() -> list[dict]:
+    """Predeclared x extrapolation probes, with separate solid and door tests."""
+    pairs = []
+    for wall_x, comparison_x, left_start, right_start in (
+        (15, 26, 10.0, 20.0),
+        (50, 38, 45.0, 55.0),
+    ):
+        for direction, start_x, action_x in (
+            ("left_to_right", left_start, 1.0),
+            ("right_to_left", right_start, -1.0),
+        ):
+            pairs.append(dict(
+                name=f"wall_x{wall_x}_solid_{direction}",
+                layouts=[[wall_x, 30], [comparison_x, 30]],
+                start=[start_x, 42.0], actions=[[action_x, 0.0] for _ in range(5)],
+                reference_x=wall_x, expected_crossed=[False, True],
+            ))
+            pairs.append(dict(
+                name=f"wall_x{wall_x}_door_{direction}",
+                layouts=[[wall_x, 30], [wall_x, 18]],
+                start=[start_x, 30.0], actions=[[action_x, 0.0] for _ in range(5)],
+                reference_x=wall_x, expected_crossed=[True, False],
+            ))
+    return pairs
+
+
 def _crossed(start_x: float, end_x: float, reference_x: float) -> bool:
     return bool((start_x < reference_x < end_x) or (end_x < reference_x < start_x))
 
@@ -201,17 +227,19 @@ def evaluate_pairs(
     checkpoint: Path, encoder_checkpoint: Path, manifest: dict | None,
     output: Path, env_config: Path, device_name: str = "auto",
     precision_name: str = "auto", seed: int = 10000,
-    checkpoint_role: str = "multi",
+    checkpoint_role: str = "multi", probe_set: str = "heldout",
 ) -> dict:
     if checkpoint_role not in {"multi", "fixed"}:
         raise ValueError(f"Unsupported checkpoint role: {checkpoint_role}")
+    if probe_set not in {"heldout", "extreme_x"}:
+        raise ValueError(f"Unsupported visual probe set: {probe_set}")
     config = load_environment_config("wall", env_config)
     device = wm.resolve_device(device_name)
     precision = wm.resolve_precision(precision_name, device)
     model, metadata, epoch = wm_proprio.load_model_and_metadata(checkpoint, device)
     if metadata.get("environment") != "wall" or model.num_hist != 1:
         raise ValueError("Visual pairs require a one-history Wall checkpoint")
-    pairs = build_matched_pairs()
+    pairs = build_matched_pairs() if probe_set == "heldout" else build_extreme_x_pairs()
     if checkpoint_role == "multi":
         if manifest is None:
             raise ValueError("Multi-layout checkpoint requires an episode manifest")
@@ -230,12 +258,17 @@ def evaluate_pairs(
         training_layouts = [training_layout]
     if manifest is not None:
         validate_manifest(manifest)
-        test_layouts = {tuple(layout) for layout in manifest["test_layouts"]}
-        if any(tuple(layout) not in test_layouts for pair in pairs for layout in pair["layouts"]):
-            raise ValueError("A visual pair layout is outside the held-out test split")
-    if checkpoint_role == "fixed":
-        train_x, train_y = training_layouts[0]
-        if any(wall_x == train_x or door_y == train_y
+        if probe_set == "heldout":
+            test_layouts = {tuple(layout) for layout in manifest["test_layouts"]}
+            if any(tuple(layout) not in test_layouts for pair in pairs for layout in pair["layouts"]):
+                raise ValueError("A visual pair layout is outside the held-out test split")
+    training_x = {wall_x for wall_x, _ in training_layouts}
+    if probe_set == "extreme_x":
+        if any(wall_x in training_x for pair in pairs for wall_x, _ in pair["layouts"]):
+            raise ValueError("Extreme probe wall coordinates must be unseen in training")
+    elif checkpoint_role == "fixed":
+        train_y = training_layouts[0][1]
+        if any(wall_x in training_x or door_y == train_y
                for pair in pairs for wall_x, door_y in pair["layouts"]):
             raise ValueError("Visual pair wall and door coordinates must be unseen by the fixed checkpoint")
     if config.actions_per_model_step != 5:
@@ -254,7 +287,8 @@ def evaluate_pairs(
     cases = [case for result in results for case in result["cases"]]
     payload = dict(
         checkpoint=str(checkpoint), checkpoint_epoch=epoch,
-        checkpoint_role=checkpoint_role, training_layouts=training_layouts,
+        checkpoint_role=checkpoint_role, probe_set=probe_set,
+        training_layouts=training_layouts,
         encoder_checkpoint=str(encoder_checkpoint), seed=seed,
         summary=dict(
             pairs=len(results), cases=len(cases),
@@ -281,6 +315,7 @@ def main(argv=None):
     parser.add_argument("--episode-manifest", type=Path,
                         help="Required for multi-layout checkpoints; optional for fixed checkpoints")
     parser.add_argument("--checkpoint-role", choices=["multi", "fixed"], default="multi")
+    parser.add_argument("--probe-set", choices=["heldout", "extreme_x"], default="heldout")
     parser.add_argument("--env-config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=10000)
@@ -291,7 +326,7 @@ def main(argv=None):
         args.checkpoint, args.encoder_checkpoint,
         load_manifest(args.episode_manifest) if args.episode_manifest else None,
         args.output, args.env_config, args.device, args.precision, args.seed,
-        args.checkpoint_role,
+        args.checkpoint_role, args.probe_set,
     )
     print(json.dumps(result["summary"], indent=2))
     print(f"Saved visual pairs to {args.output}")

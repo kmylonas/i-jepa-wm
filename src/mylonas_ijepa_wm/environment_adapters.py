@@ -139,7 +139,9 @@ class WallAdapter:
             self.config.wall_location, self.config.door_location
         ]]
         self.layout = tuple(layout) if layout is not None else tuple(layouts[seed % len(layouts)])
-        if (len(self.layout) != 2 or not 20 <= self.layout[0] <= 44
+        # Explicit probe layouts may use x=15 or x=50; dataset configs and
+        # manifests retain their narrower training/evaluation ranges.
+        if (len(self.layout) != 2 or not 15 <= self.layout[0] <= 50
                 or not 10 <= self.layout[1] <= 54):
             raise ValueError(f"Invalid Wall layout: {self.layout}")
         self._make_environment(*self.layout, seed)

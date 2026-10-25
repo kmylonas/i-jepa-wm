@@ -283,6 +283,41 @@ at x=32 and its door at y=30. Compare crossing decisions and position errors
 case by case with `visual_input_pairs.json`; these eight cases test specific
 visual contrasts, not overall collision accuracy across all possible states.
 
+### Probe more distant wall positions
+
+`--probe-set extreme_x` adds wall x=15 and x=50, beyond both the nine training
+positions (24, 32, 40) and the original held-out range (26, 38). The pinned
+DotWall simulator supports these fixed layouts, although the dataset manifest
+and normal collection configuration deliberately retain the narrower x=20–44
+range. Eight predeclared pairs test each extreme wall in both travel directions:
+four compare a solid wall against open space at the same scoring x, and four
+compare an opening at door y=30 against a solid segment there when the door
+is at y=18. Each pair keeps the start, five actions, and scoring line fixed;
+the simulator must give opposite crossing outcomes. The y=30 and y=18 door
+coordinates were seen by the multi-layout model, so this set focuses on
+generalization of wall x, not simultaneous extrapolation in both coordinates.
+
+Run both checkpoints with the same encoder, seed, device, and precision:
+
+```bash
+python -m src.mylonas_ijepa_wm.evaluate_wall_visual_pairs \
+  --checkpoint "$RUN_DIR/best.pt" --checkpoint-role multi --probe-set extreme_x \
+  --encoder-checkpoint "$ENCODER" --episode-manifest "$MANIFEST" \
+  --env-config "$ENV_CONFIG" --output "$EXP_ROOT/results/extreme_x_multi.json" \
+  --device cuda --precision auto
+python -m src.mylonas_ijepa_wm.evaluate_wall_visual_pairs \
+  --checkpoint "$FIXED_WM" --checkpoint-role fixed --probe-set extreme_x \
+  --encoder-checkpoint "$ENCODER" --episode-manifest "$MANIFEST" \
+  --env-config "$ENV_CONFIG" --output "$EXP_ROOT/results/extreme_x_fixed.json" \
+  --device cuda --precision auto
+```
+
+The multi-model manifest identity is still checked. These layouts are an
+additional extrapolation probe and are not members of its original held-out
+test split. At x=15 and x=50, one side of the wall is close to the border,
+so use the matched crossing outcomes and endpoint errors together rather
+than treating this small case set as a general success rate.
+
 If only the figure style changes, the saved JSON contains everything needed
 to redraw the PNGs without loading the encoder or world model. In Colab,
 update the repository and run:

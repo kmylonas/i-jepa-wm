@@ -48,6 +48,29 @@ def test_matched_visual_pairs_have_opposite_real_crossing_outcomes():
         assert actual == [True, False] or actual == [False, True]
 
 
+def test_extreme_wall_positions_are_simulated_with_matched_contrasting_outcomes():
+    from src.mylonas_ijepa_wm.evaluate_wall_visual_pairs import build_extreme_x_pairs
+
+    adapter = WallAdapter(EnvironmentConfig(env="wall", dino_wm_root=str(_dino_source())), 5)
+    pairs = build_extreme_x_pairs()
+    assert len(pairs) == 8
+    assert {layout[0] for pair in pairs for layout in pair["layouts"]} == {15, 26, 38, 50}
+    assert {layout[1] for pair in pairs for layout in pair["layouts"]} == {18, 30}
+    for pair in pairs:
+        actual = []
+        for layout in pair["layouts"]:
+            adapter.reset(10000, layout=layout)
+            adapter.env.set_init_state(np.asarray(pair["start"], dtype=np.float32))
+            adapter.env.reset()
+            start = adapter.state().copy()
+            assert start.tolist() == pair["start"]
+            for action in pair["actions"]:
+                end = adapter.step(action).state
+            actual.append(_crossed(start[0], end[0], pair["reference_x"]))
+        assert actual == pair["expected_crossed"], pair["name"]
+        assert actual[0] != actual[1]
+
+
 def test_model_sees_same_state_and_actions_but_different_visual_tokens(monkeypatch):
     from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
 
@@ -158,6 +181,50 @@ def test_fixed_checkpoint_uses_its_own_training_layout_without_multi_manifest(tm
     assert result["training_layouts"] == [[32, 30]]
     assert len(result["pairs"]) == 4
     assert all(pair["training_layouts"] == [[32, 30]] for pair in result["pairs"])
+
+    extreme = visual_pairs.evaluate_pairs(
+        tmp_path / "checkpoint.pt", tmp_path / "encoder.pt", None,
+        tmp_path / "extreme.json", config, "cpu", "fp32",
+        checkpoint_role="fixed", probe_set="extreme_x",
+    )
+    assert extreme["probe_set"] == "extreme_x"
+    assert len(extreme["pairs"]) == 8
+
+
+def test_multi_checkpoint_extreme_probes_preserve_manifest_validation(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
+    from src.mylonas_ijepa_wm.wall_layout_manifest import manifest_digest
+
+    config = tmp_path / "environment.json"
+    config.write_text('{"env": "wall"}')
+    manifest = prepare_manifest(train_episodes=90, val_episodes=20, test_episodes=40)
+    metadata = {
+        "environment": "wall", "experiment_manifest_sha256": manifest_digest(manifest),
+        "layout_splits": {split: manifest[f"{split}_layouts"] for split in ("train", "val", "test")},
+        **{f"{split}_ids": [entry["episode_id"] for entry in manifest["episodes"]
+           if entry["split"] == split] for split in ("train", "val", "test")},
+    }
+    monkeypatch.setattr(
+        visual_pairs.wm_proprio, "load_model_and_metadata",
+        lambda *args: (type("Model", (), {"num_hist": 1})(), metadata, 15),
+    )
+    monkeypatch.setattr(visual_pairs.visual, "load_frozen_ijepa_encoder", lambda *args: object())
+    monkeypatch.setattr(visual_pairs, "create_adapter", lambda *args, **kwargs: type(
+        "Adapter", (), {"close": lambda self: None},
+    )())
+    monkeypatch.setattr(visual_pairs, "evaluate_pair", lambda *args: {
+        "name": args[4]["name"], "predicted_contrast": True, "both_correct": True,
+        "cases": [{"position_error": 0.0, "predicted_crossed": True, "actual_crossed": True}],
+    })
+    monkeypatch.setattr(visual_pairs, "save_pair_figure", lambda record, path: path)
+
+    result = visual_pairs.evaluate_pairs(
+        tmp_path / "checkpoint.pt", tmp_path / "encoder.pt", manifest,
+        tmp_path / "extreme.json", config, "cpu", "fp32", probe_set="extreme_x",
+    )
+    assert result["probe_set"] == "extreme_x"
+    assert result["training_layouts"] == manifest["train_layouts"]
+    assert len(result["pairs"]) == 8
 
 
 def test_fixed_checkpoint_rejects_a_seen_test_coordinate(tmp_path, monkeypatch):
