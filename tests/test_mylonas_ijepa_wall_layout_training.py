@@ -1,4 +1,5 @@
 import copy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 import torch
 
 from src.mylonas_ijepa_wm import embed_frames, evaluate_rollouts_proprio, wm_proprio
+from src.mylonas_ijepa_wm.proprio_vit import ProprioViT
 from src.mylonas_ijepa_wm.wall_layout_manifest import manifest_digest, validate_manifest
 
 
@@ -133,3 +135,51 @@ def test_rollout_layout_group_rejects_sidecar_from_another_manifest(tmp_path):
             [2], tmp_path, expected_manifest_sha256=manifest_digest(manifest),
             allowed_layouts=manifest["val_layouts"],
         )
+
+
+def test_wall_rollout_cli_uses_two_state_components_for_full_and_layout_datasets(tmp_path):
+    latent_dir = tmp_path / "latents"
+    trajectory_dir = tmp_path / "trajectories"
+    latent_dir.mkdir()
+    trajectory_dir.mkdir()
+    np.save(latent_dir / "episode_0001.npy", np.zeros((6, 2, 3), dtype=np.float16))
+    torch.save(dict(
+        wall_layout=(28, 24), manifest_sha256="wall-manifest",
+        sampled_states=torch.zeros(6, 2), states=torch.zeros(6, 2),
+        actions=torch.zeros(5, 2), macro_actions=torch.zeros(1, 10),
+        actions_per_model_step=5, embedding_frame_stride=1,
+    ), trajectory_dir / "episode_0001.pt")
+    configuration = dict(
+        num_patches=2, num_hist=1, num_t_blocks=1, ijepa_dim=3,
+        action_dim=10, action_embed_dim=4, proprio_dim=2,
+        proprio_embed_dim=4, embed_dim=8, num_heads=2,
+        mlp_dim=16, dropout=0.0,
+    )
+    model = ProprioViT(**configuration)
+    checkpoint = tmp_path / "best.pt"
+    torch.save(dict(
+        model=model.state_dict(), epoch=0,
+        metadata=dict(
+            model_type="proprio_v1", environment="wall", camera="topdown",
+            proprio_fields=("x", "y"), model_configuration=configuration,
+            val_ids=[1], layout_splits={"val": [[28, 24]]},
+            experiment_manifest_sha256="wall-manifest",
+            normalize_actions=False, state_mean=torch.zeros(2),
+            state_std=torch.ones(2), proprio_loss_weight=1.0,
+        ),
+    ), checkpoint)
+    output = tmp_path / "metrics.json"
+
+    evaluate_rollouts_proprio.main([
+        "--checkpoint", str(checkpoint),
+        "--latent-dir", str(latent_dir),
+        "--trajectory-dir", str(trajectory_dir),
+        "--split", "val", "--horizon", "1", "--by-wall-layout",
+        "--batch-size", "1", "--device", "cpu", "--precision", "fp32",
+        "--output", str(output),
+    ])
+
+    metrics = json.loads(output.read_text())
+    assert metrics["split"] == "val"
+    assert metrics["per_horizon"][0]["horizon"] == 1
+    assert metrics["by_wall_layout"]["28,24"]["num_episodes"] == 1

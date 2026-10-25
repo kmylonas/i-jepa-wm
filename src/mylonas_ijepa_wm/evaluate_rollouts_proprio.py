@@ -286,6 +286,7 @@ def main(argv=None):
         action_mean = action_std = None
 
     num_hist = metadata["model_configuration"]["num_hist"]
+    state_dim = len(metadata["proprio_fields"])
     dataset = wm_proprio.ProprioWorldModelDataset(
         latent_dir=args.latent_dir,
         trajectory_dir=args.trajectory_dir,
@@ -296,6 +297,7 @@ def main(argv=None):
         action_std=action_std,
         state_mean=metadata["state_mean"],
         state_std=metadata["state_std"],
+        state_dim=state_dim,
     )
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -343,6 +345,7 @@ def main(argv=None):
                 action_std=action_std,
                 state_mean=metadata["state_mean"],
                 state_std=metadata["state_std"],
+                state_dim=state_dim,
             )
             group_loader = torch.utils.data.DataLoader(
                 group_dataset, batch_size=args.batch_size, shuffle=False,
