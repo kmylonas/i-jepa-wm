@@ -7,7 +7,7 @@ import torch
 
 from src.mylonas_ijepa_wm.environment_adapters import WallAdapter
 from src.mylonas_ijepa_wm.environment_configs import EnvironmentConfig
-from src.mylonas_ijepa_wm.wall_layout_manifest import TEST_LAYOUTS
+from src.mylonas_ijepa_wm.wall_layout_manifest import TEST_LAYOUTS, prepare_manifest
 
 
 def _dino_source():
@@ -82,6 +82,48 @@ def test_model_sees_same_state_and_actions_but_different_visual_tokens(monkeypat
     assert all(len(case["actual_positions"]) == 6 for case in record["cases"])
 
 
+def test_rejects_pair_whose_real_outcomes_do_not_contrast(monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
+
+    class StationaryModel(torch.nn.Module):
+        def forward(self, latents, states, actions):
+            return latents, states
+
+    monkeypatch.setattr(visual_pairs.visual, "encode_frame", lambda *args: torch.zeros(1, 1))
+    adapter = WallAdapter(EnvironmentConfig(env="wall", dino_wm_root=str(_dino_source())), 5)
+    pair = visual_pairs.build_matched_pairs()[0]
+    pair["layouts"] = [[26, 22], [26, 22]]
+    with pytest.raises(ValueError, match="contrast"):
+        visual_pairs.evaluate_pair(
+            adapter, object(), StationaryModel(),
+            {"state_mean": torch.zeros(2), "state_std": torch.ones(2),
+             "normalize_actions": False},
+            pair, 10000, torch.device("cpu"), "fp32",
+        )
+
+
+def test_rejects_other_manifest_before_loading_encoder(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
+
+    config = tmp_path / "environment.json"
+    config.write_text('{"env": "wall"}')
+    monkeypatch.setattr(
+        visual_pairs.wm_proprio, "load_model_and_metadata",
+        lambda *args: (type("Model", (), {"num_hist": 1})(),
+                       {"environment": "wall", "experiment_manifest_sha256": "other"}, 0),
+    )
+    monkeypatch.setattr(
+        visual_pairs.visual, "load_frozen_ijepa_encoder",
+        lambda *args: pytest.fail("encoder loaded before manifest validation"),
+    )
+    with pytest.raises(ValueError, match="manifest"):
+        visual_pairs.evaluate_pairs(
+            tmp_path / "checkpoint.pt", tmp_path / "encoder.pt",
+            prepare_manifest(train_episodes=90, val_episodes=20, test_episodes=40),
+            tmp_path / "result.json", config, "cpu", "fp32",
+        )
+
+
 def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_path):
     import matplotlib.pyplot as plt
     from src.mylonas_ijepa_wm.evaluate_wall_visual_pairs import (
@@ -105,6 +147,10 @@ def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_
     fig = build_pair_figure(record)
     assert len(fig.axes) == 2
     for ax, case in zip(fig.axes, record["cases"]):
+        assert "Crossed x=26" in ax.get_title()
+        reference = [line for line in ax.lines if line.get_label() == "Crossing plane x=26"]
+        assert len(reference) == 1
+        assert reference[0].get_xdata()[0] == 26
         paths = [line for line in ax.lines if line.get_label() == "Actual trajectory"]
         assert len(paths) == 1
         assert list(paths[0].get_xdata()) == [p[0] for p in case["actual_positions"]]
@@ -116,6 +162,11 @@ def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_
         assert all(line.get_alpha() < 0.5 for line in guides)
         assert len(ax.patches) == 2
     plt.close(fig)
+    record["cases"][1]["predicted_final_position"] = [65.0, 60.0]
+    record["cases"][1]["predicted_crossed"] = True
+    wide_fig = build_pair_figure(record)
+    assert all(ax.get_xlim()[1] > 65 and ax.get_ylim()[0] > 60 for ax in wide_fig.axes)
+    plt.close(wide_fig)
     path = tmp_path / "nested" / "comparison.png"
     save_pair_figure(record, path)
     assert path.is_file() and path.stat().st_size > 10_000

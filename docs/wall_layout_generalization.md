@@ -197,16 +197,52 @@ python -m src.mylonas_ijepa_wm.evaluate_wall_visual_pairs \
   --device cuda --precision auto
 ```
 
-On Colab, use the local encoder copy, `ENCODER_LOCAL`, and Drive paths for the
-checkpoint, manifest, environment config, and output. This command reads no
-episode caches. It saves four PNGs under `visual_input_pairs_figures/` next to
-the JSON. Each PNG has two panels with identical axes: the current wall and
-door opening, faint dashed guides for the training wall x positions 24, 32,
-and 40, the actual five-action ball trajectory, and the world model's single
-predicted endpoint. These guides indicate training wall *positions*; they do
-not claim that any one of the nine training layouts is present in the test
-scene. The JSON reports crossing agreement, endpoint error, and whether both
-contrasting cases in each pair were predicted correctly.
+For Colab after cloning the `wall-layout-generalization` branch and defining
+the same `RUN_DIR`, `ENCODER_LOCAL`, `MANIFEST`, `ENV_CONFIG`, `LOCAL_ROOT`, and
+`RESULTS_DIR` paths used above, this cell updates the source, points the
+saved environment configuration at the current pinned DINO-WM checkout, and
+runs the test:
+
+```python
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path("/content/i-jepa-wm")
+dino_root = Path("/content/dino_wm")
+subprocess.run(["git", "-C", str(repo), "pull", "--ff-only"], check=True)
+assert (dino_root / "env/wall/envs/wall.py").is_file()
+assert ENCODER_LOCAL.is_file() and (RUN_DIR / "best.pt").is_file()
+
+local_config = LOCAL_ROOT / "environment_visual_pairs.json"
+local_config.parent.mkdir(parents=True, exist_ok=True)
+settings = json.loads(ENV_CONFIG.read_text())
+settings["dino_wm_root"] = str(dino_root)
+local_config.write_text(json.dumps(settings, indent=2))
+
+output = RESULTS_DIR / "visual_input_pairs.json"
+subprocess.run([
+    sys.executable, "-u", "-m", "src.mylonas_ijepa_wm.evaluate_wall_visual_pairs",
+    "--checkpoint", str(RUN_DIR / "best.pt"),
+    "--encoder-checkpoint", str(ENCODER_LOCAL),
+    "--episode-manifest", str(MANIFEST),
+    "--env-config", str(local_config),
+    "--output", str(output),
+    "--device", "cuda", "--precision", "auto",
+], cwd=repo, check=True)
+```
+
+This command reads no episode caches. It saves four PNGs under
+`visual_input_pairs_figures/` next to the JSON. Each PNG has two panels with
+identical axes: the current wall and door opening, faint dashed guides for
+the training wall x positions 24, 32, and 40, the actual five-action ball
+trajectory, and the world model's single predicted endpoint. A dotted line
+marks the x coordinate whose crossing is measured, which can differ from the
+current wall's x coordinate. These guides indicate training wall *positions*;
+they do not claim that any one of the nine training layouts is present in the
+test scene. The JSON reports crossing agreement, endpoint error, and whether
+both contrasting cases in each pair were predicted correctly.
 
 Correct contrasting predictions with the same position and action support
 visual-input dependence in these cases. They do not establish that every

@@ -36,11 +36,11 @@
 **Interfaces:**
 - Produces: `build_matched_pairs() -> list[dict]`, `evaluate_pair(adapter, encoder, model, metadata, pair, seed, device, precision) -> dict`, `evaluate_pairs(checkpoint, encoder_checkpoint, manifest, output, env_config, device_name, precision_name) -> dict`.
 
-- [ ] Write tests proving fixed pair starts/actions, held-out layouts, contrasting actual crossings, and a fake model whose only varying input is the latent.
-- [ ] Run the test file and observe failure because the module or functions are absent.
-- [ ] Implement fixed comparisons, prediction and simulation records, manifest validation, and JSON output.
-- [ ] Run the test file and observe all tests pass.
-- [ ] Commit Task 1.
+- [x] Write tests proving fixed pair starts/actions, held-out layouts, contrasting actual crossings, and a fake model whose only varying input is the latent.
+- [x] Run the test file and observe failure because the module or functions are absent.
+- [x] Implement fixed comparisons, prediction and simulation records, manifest validation, and JSON output.
+- [x] Run the test file and observe all tests pass.
+- [x] Commit Task 1.
 
 ### Task 2: Figures and Colab usage
 
@@ -53,8 +53,8 @@
 - Consumes: Task 1 JSON records, including every primitive position and predicted endpoint.
 - Produces: one PNG per pair in the output directory and one documented Colab CLI invocation.
 
-- [ ] Write a failing plot test checking file creation, two layout panels, actual path, predicted endpoint marker, and faint training x guides.
-- [ ] Run that test and observe the expected failure.
-- [ ] Implement figures and document the fresh-Colab command and interpretation.
-- [ ] Run the new tests and relevant existing Wall tests; verify CLI `--help`.
-- [ ] Commit Task 2.
+- [x] Write a failing plot test checking file creation, two layout panels, actual path, predicted endpoint marker, and faint training x guides.
+- [x] Run that test and observe the expected failure.
+- [x] Implement figures and document the fresh-Colab command and interpretation.
+- [x] Run the new tests and relevant existing Wall tests; verify CLI `--help`.
+- [x] Commit Task 2.

@@ -111,6 +111,17 @@ def build_pair_figure(result: dict):
     from matplotlib.patches import Rectangle
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
+    x_values = [24, 32, 40, result["reference_x"]]
+    y_values = []
+    for case in result["cases"]:
+        wall_x, door_y = case["layout"]
+        x_values.extend((wall_x - 3, wall_x + 3))
+        y_values.extend((door_y - 4, door_y + 4))
+        for position in [*case["actual_positions"], case["predicted_final_position"]]:
+            x_values.append(position[0])
+            y_values.append(position[1])
+    x_limits = (min(x_values) - 5, max(x_values) + 5)
+    y_limits = (max(y_values) + 5, min(y_values) - 5)
     for ax, case in zip(axes, result["cases"]):
         wall_x, door_y = case["layout"]
         for train_x in (24, 32, 40):
@@ -121,6 +132,8 @@ def build_pair_figure(result: dict):
                 (wall_x - 3, bottom), 6, top - bottom,
                 facecolor="#29343d", edgecolor="none", zorder=2,
             ))
+        ax.axvline(result["reference_x"], color="#8b4aa8", linestyle=":",
+                   linewidth=1.8, zorder=3, label=f"Crossing plane x={result['reference_x']}")
         positions = np.asarray(case["actual_positions"], dtype=float)
         ax.plot(positions[:, 0], positions[:, 1], color="#1678a7", linewidth=2.5,
                 marker="o", markersize=3.5, zorder=4, label="Actual trajectory")
@@ -129,11 +142,12 @@ def build_pair_figure(result: dict):
         ax.scatter(*case["predicted_final_position"], s=130, marker="X",
                    color="#d4542d", edgecolor="white", linewidth=0.8,
                    zorder=6, label="Predicted endpoint")
-        actual = "crossed" if case["actual_crossed"] else "blocked"
-        predicted = "crossed" if case["predicted_crossed"] else "blocked"
-        ax.set_title(f"Wall x={wall_x}, door y={door_y}\nActual: {actual} · WM: {predicted}")
-        ax.set_xlim(15, 49)
-        ax.set_ylim(54, 8)
+        actual = "yes" if case["actual_crossed"] else "no"
+        predicted = "yes" if case["predicted_crossed"] else "no"
+        ax.set_title(f"Wall x={wall_x}, door y={door_y}\n"
+                     f"Crossed x={result['reference_x']}: actual {actual} · WM {predicted}")
+        ax.set_xlim(*x_limits)
+        ax.set_ylim(*y_limits)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("x (environment units)")
         ax.grid(alpha=0.13, zorder=0)
@@ -142,10 +156,10 @@ def build_pair_figure(result: dict):
     unique = {}
     for handle, label in zip(handles, labels):
         unique.setdefault(label, handle)
-    fig.legend(unique.values(), unique.keys(), loc="lower center", ncol=4,
+    fig.legend(unique.values(), unique.keys(), loc="lower center", ncol=5,
                frameon=False, bbox_to_anchor=(0.5, 0.015))
     fig.suptitle(result["name"].replace("_", " "))
-    fig.text(0.5, 0.085,
+    fig.text(0.5, 0.09,
              "Dashed guides: training wall x positions. The WM predicts only the endpoint after five actions.",
              ha="center", fontsize=9)
     fig.tight_layout(rect=(0, 0.13, 1, 0.93))
