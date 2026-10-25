@@ -147,8 +147,8 @@ def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_
     fig = build_pair_figure(record)
     assert len(fig.axes) == 2
     for ax, case in zip(fig.axes, record["cases"]):
-        assert "Crossed x=26" in ax.get_title()
-        reference = [line for line in ax.lines if line.get_label() == "Crossing plane x=26"]
+        assert "Crossed test line x=26" in ax.get_title()
+        reference = [line for line in ax.lines if line.get_label() == "Virtual test line x=26"]
         assert len(reference) == 1
         assert reference[0].get_xdata()[0] == 26
         paths = [line for line in ax.lines if line.get_label() == "Actual trajectory"]
@@ -157,10 +157,21 @@ def test_pair_figure_shows_actual_paths_predicted_endpoints_and_wall_guides(tmp_
         predicted = [item for item in ax.collections if item.get_label() == "Predicted endpoint"]
         assert len(predicted) == 1
         assert predicted[0].get_offsets()[0].tolist() == case["predicted_final_position"]
-        guides = [line for line in ax.lines if line.get_label() == "Training wall x"]
-        assert [line.get_xdata()[0] for line in guides] == [24, 32, 40]
+        guides = [line for line in ax.lines if line.get_label() == "Training layout (faint)"]
+        assert len(guides) == 18  # Two solid segments for each of nine layouts.
+        for wall_x in (24, 32, 40):
+            for door_y in (18, 30, 42):
+                rail_x = wall_x + {18: -0.9, 30: 0.0, 42: 0.9}[door_y]
+                pieces = [line for line in guides if line.get_xdata()[0] == rail_x]
+                assert len(pieces) == 2
+                assert sorted(tuple(line.get_ydata()) for line in pieces) == [
+                    (0, door_y - 4), (door_y + 4, 64),
+                ]
         assert all(line.get_alpha() < 0.5 for line in guides)
         assert len(ax.patches) == 2
+        assert ax.get_xlim()[0] <= -0.5 and ax.get_xlim()[1] >= 64.5
+        assert ax.get_ylim()[0] >= 64.5 and ax.get_ylim()[1] <= -0.5
+    assert "not a wall" in fig.texts[-1].get_text()
     plt.close(fig)
     record["cases"][1]["predicted_final_position"] = [65.0, 60.0]
     record["cases"][1]["predicted_crossed"] = True

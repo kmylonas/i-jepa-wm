@@ -235,14 +235,32 @@ subprocess.run([
 
 This command reads no episode caches. It saves four PNGs under
 `visual_input_pairs_figures/` next to the JSON. Each PNG has two panels with
-identical axes: the current wall and door opening, faint dashed guides for
-the training wall x positions 24, 32, and 40, the actual five-action ball
-trajectory, and the world model's single predicted endpoint. A dotted line
-marks the x coordinate whose crossing is measured, which can differ from the
-current wall's x coordinate. These guides indicate training wall *positions*;
-they do not claim that any one of the nine training layouts is present in the
-test scene. The JSON reports crossing agreement, endpoint error, and whether
-both contrasting cases in each pair were predicted correctly.
+identical full-frame 65×65 axes. The solid wall shows the current layout's
+real width and door opening. Faint dashed rails show all nine *separate*
+training layouts: wall centers x=24, 32, 40 and door centers y=18, 30, 42.
+The three rails at each x are shifted slightly sideways so their distinct
+door openings remain visible; those shifts are only a plotting device. The
+blue path is the actual five-action ball trajectory, and the orange X is
+the world model's single predicted endpoint. The purple dotted line is a
+virtual scoring threshold, not a wall. A case counts as crossing when its
+endpoint passes that x coordinate, which may differ from the current wall x.
+The JSON reports crossing agreement, endpoint error, and whether both
+contrasting cases in each pair were predicted correctly.
+
+If only the figure style changes, the saved JSON contains everything needed
+to redraw the PNGs without loading the encoder or world model. In Colab,
+update the repository and run:
+
+```python
+subprocess.run(["git", "-C", str(REPO), "pull", "--ff-only"], check=True)
+from src.mylonas_ijepa_wm.evaluate_wall_visual_pairs import save_pair_figure
+
+results = json.loads((RESULTS_DIR / "visual_input_pairs.json").read_text())
+for pair in results["pairs"]:
+    save_pair_figure(
+        pair, RESULTS_DIR / "visual_input_pairs_figures" / f"{pair['name']}.png"
+    )
+```
 
 Correct contrasting predictions with the same position and action support
 visual-input dependence in these cases. They do not establish that every

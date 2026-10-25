@@ -11,7 +11,9 @@ from src.mylonas_ijepa_wm import plan_pointmaze as visual
 from src.mylonas_ijepa_wm import wm, wm_proprio
 from src.mylonas_ijepa_wm.environment_adapters import create_adapter
 from src.mylonas_ijepa_wm.environment_configs import load_environment_config
-from src.mylonas_ijepa_wm.wall_layout_manifest import load_manifest, validate_checkpoint_manifest
+from src.mylonas_ijepa_wm.wall_layout_manifest import (
+    TRAIN_LAYOUTS, load_manifest, validate_checkpoint_manifest,
+)
 
 
 def build_matched_pairs() -> list[dict]:
@@ -110,30 +112,38 @@ def build_pair_figure(result: dict):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
-    x_values = [24, 32, 40, result["reference_x"]]
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8), sharex=True, sharey=True)
+    x_values = []
     y_values = []
     for case in result["cases"]:
-        wall_x, door_y = case["layout"]
-        x_values.extend((wall_x - 3, wall_x + 3))
-        y_values.extend((door_y - 4, door_y + 4))
         for position in [*case["actual_positions"], case["predicted_final_position"]]:
             x_values.append(position[0])
             y_values.append(position[1])
-    x_limits = (min(x_values) - 5, max(x_values) + 5)
-    y_limits = (max(y_values) + 5, min(y_values) - 5)
+    # DotWall renders pixels 0..64. Expand only if a prediction leaves the frame.
+    x_limits = (min(-0.5, min(x_values) - 2), max(64.5, max(x_values) + 2))
+    y_limits = (max(64.5, max(y_values) + 2), min(-0.5, min(y_values) - 2))
+    train_doors = sorted({door_y for _, door_y in TRAIN_LAYOUTS})
+    rail_offsets = {
+        door_y: (index - (len(train_doors) - 1) / 2) * 0.9
+        for index, door_y in enumerate(train_doors)
+    }
     for ax, case in zip(axes, result["cases"]):
         wall_x, door_y = case["layout"]
-        for train_x in (24, 32, 40):
-            ax.axvline(train_x, color="#626b73", linestyle="--", linewidth=1.5,
-                       alpha=0.25, zorder=0, label="Training wall x")
+        for train_x, train_door_y in TRAIN_LAYOUTS:
+            rail_x = train_x + rail_offsets[train_door_y]
+            for bottom, top in ((0, train_door_y - 4), (train_door_y + 4, 64)):
+                ax.plot([rail_x, rail_x], [bottom, top], color="#859443",
+                        linestyle="--", linewidth=1.4, alpha=0.3, zorder=3,
+                        label="Training layout (faint)")
         for bottom, top in ((0, door_y - 4), (door_y + 4, 64)):
             ax.add_patch(Rectangle(
                 (wall_x - 3, bottom), 6, top - bottom,
                 facecolor="#29343d", edgecolor="none", zorder=2,
+                label="Current wall" if bottom == 0 else None,
             ))
         ax.axvline(result["reference_x"], color="#8b4aa8", linestyle=":",
-                   linewidth=1.8, zorder=3, label=f"Crossing plane x={result['reference_x']}")
+                   linewidth=1.8, zorder=3,
+                   label=f"Virtual test line x={result['reference_x']}")
         positions = np.asarray(case["actual_positions"], dtype=float)
         ax.plot(positions[:, 0], positions[:, 1], color="#1678a7", linewidth=2.5,
                 marker="o", markersize=3.5, zorder=4, label="Actual trajectory")
@@ -145,7 +155,7 @@ def build_pair_figure(result: dict):
         actual = "yes" if case["actual_crossed"] else "no"
         predicted = "yes" if case["predicted_crossed"] else "no"
         ax.set_title(f"Wall x={wall_x}, door y={door_y}\n"
-                     f"Crossed x={result['reference_x']}: actual {actual} · WM {predicted}")
+                     f"Crossed test line x={result['reference_x']}: actual {actual} · WM {predicted}")
         ax.set_xlim(*x_limits)
         ax.set_ylim(*y_limits)
         ax.set_aspect("equal", adjustable="box")
@@ -156,13 +166,16 @@ def build_pair_figure(result: dict):
     unique = {}
     for handle, label in zip(handles, labels):
         unique.setdefault(label, handle)
-    fig.legend(unique.values(), unique.keys(), loc="lower center", ncol=5,
-               frameon=False, bbox_to_anchor=(0.5, 0.015))
+    fig.legend(unique.values(), unique.keys(), loc="lower center", ncol=6,
+               frameon=False, bbox_to_anchor=(0.5, 0.025))
     fig.suptitle(result["name"].replace("_", " "))
-    fig.text(0.5, 0.09,
-             "Dashed guides: training wall x positions. The WM predicts only the endpoint after five actions.",
+    fig.text(0.5, 0.145,
+             "Faint rails show nine separate training layouts; rails at each x are offset for visibility.",
              ha="center", fontsize=9)
-    fig.tight_layout(rect=(0, 0.13, 1, 0.93))
+    fig.text(0.5, 0.12,
+             "Purple test line is a scoring threshold, not a wall. The WM predicts only the endpoint after five actions.",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, 0.2, 1, 0.93))
     return fig
 
 
