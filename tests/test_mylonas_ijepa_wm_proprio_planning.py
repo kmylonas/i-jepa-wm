@@ -23,6 +23,30 @@ class StateDrivenModel(torch.nn.Module):
 
 
 class ProprioPlanningTest(unittest.TestCase):
+    def test_latent_planner_exposes_scored_cem_candidates(self):
+        observed = []
+        plan_pointmaze_proprio.plan_action(
+            model=StateDrivenModel(),
+            latent_history=torch.zeros(1, 1, 1),
+            state_history=torch.zeros(1, 4),
+            action_history=torch.empty(0, 1),
+            target_latent=torch.zeros(1, 1),
+            action_low=torch.tensor([-2.0]),
+            action_high=torch.tensor([2.0]),
+            device=torch.device("cpu"),
+            planning_horizon=1,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=4,
+            candidate_observer=lambda iteration, actions, costs: observed.append(
+                (iteration, actions, costs)
+            ),
+        )
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][1].shape, (4, 1, 1))
+        self.assertEqual(observed[0][2].shape, (4,))
+
     def test_cli_loads_checkpoint_and_writes_episode_results(self):
         class TinyEncoder(torch.nn.Module):
             def forward(self, images):

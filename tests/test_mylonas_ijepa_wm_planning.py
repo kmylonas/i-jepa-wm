@@ -64,6 +64,32 @@ class ActionAlignmentTest(unittest.TestCase):
         torch.testing.assert_close(candidates, original)
 
 
+class CandidateObservationTest(unittest.TestCase):
+    def test_observer_receives_scored_actions_after_action_limit(self):
+        seen = []
+
+        planning.cem_optimize(
+            score_fn=lambda actions: actions[:, 0, 0].square(),
+            horizon=1,
+            action_dim=1,
+            action_low=torch.tensor([-10.0]),
+            action_high=torch.tensor([10.0]),
+            population=8,
+            num_elites=2,
+            num_iterations=2,
+            generator=torch.Generator().manual_seed(4),
+            candidate_transform=lambda actions: actions.clamp(-0.5, 0.5),
+            candidate_observer=lambda iteration, actions, costs: seen.append(
+                (iteration, actions.clone(), costs.clone())
+            ),
+        )
+
+        self.assertEqual([item[0] for item in seen], [0, 1])
+        for _, actions, costs in seen:
+            self.assertLessEqual(float(actions.abs().max()), 0.5)
+            torch.testing.assert_close(costs, actions[:, 0, 0].square())
+
+
 class CandidateRolloutTest(unittest.TestCase):
     def test_chunked_rollout_preserves_candidate_order(self):
         history = torch.tensor([[[[0.0]], [[1.0]], [[3.0]]]])

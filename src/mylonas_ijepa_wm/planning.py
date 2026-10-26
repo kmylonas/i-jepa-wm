@@ -278,6 +278,7 @@ def cem_optimize(
     min_std=0.05,
     generator=None,
     candidate_transform=None,
+    candidate_observer=None,
 ):
     _validate_cem_arguments(
         horizon=horizon,
@@ -305,7 +306,7 @@ def cem_optimize(
     best_actions = None
     best_cost = None
 
-    for _ in range(num_iterations):
+    for iteration in range(num_iterations):
         noise = torch.randn(
             population,
             horizon,
@@ -327,6 +328,10 @@ def cem_optimize(
         if costs.shape != (population,):
             raise ValueError(
                 "score_fn must return one cost per candidate"
+            )
+        if candidate_observer is not None:
+            candidate_observer(
+                iteration, candidates.detach().clone(), costs.detach().clone()
             )
 
         elite_indices = torch.topk(

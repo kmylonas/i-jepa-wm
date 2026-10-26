@@ -152,6 +152,7 @@ def plan_action(
     state_std=None,
     max_action_length=None,
     micro_action_dim=2,
+    candidate_observer=None,
 ):
     if cost not in {"latent", "position"}:
         raise ValueError(f"unknown cost mode: {cost}")
@@ -216,6 +217,7 @@ def plan_action(
         min_std=min_std,
         generator=generator,
         candidate_transform=limit_action_lengths if max_action_length is not None else None,
+        candidate_observer=candidate_observer,
     )
 
 
