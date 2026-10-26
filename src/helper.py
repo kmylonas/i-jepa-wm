@@ -7,6 +7,8 @@
 
 import logging
 import sys
+from hashlib import sha256
+from pathlib import Path
 
 import torch
 
@@ -18,6 +20,28 @@ from src.utils.tensors import trunc_normal_
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
+
+
+def initialize_from_released_checkpoint(path, encoder, predictor, target_encoder) -> dict:
+    """Initialize I-JEPA weights without restoring pretraining optimizer state."""
+    path = Path(path)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    for name, model in (
+        ("encoder", encoder),
+        ("predictor", predictor),
+        ("target_encoder", target_encoder),
+    ):
+        if name not in checkpoint or not isinstance(checkpoint[name], dict):
+            raise ValueError(f"Released checkpoint is missing {name}")
+        state = {key.removeprefix("module."): value for key, value in checkpoint[name].items()}
+        if len(state) != len(checkpoint[name]):
+            raise ValueError(f"Released checkpoint has duplicate {name} keys after prefix removal")
+        model.load_state_dict(state, strict=True)
+    digest = sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return {"epoch": int(checkpoint["epoch"]), "sha256": digest.hexdigest()}
 
 
 def load_checkpoint(
