@@ -112,13 +112,14 @@ and a best validation checkpoint rather than every epoch.
 
 ## Interfaces and safeguards
 
-- Add a Wall frame dataset/index and a standalone I-JEPA fine-tuning command
-  beside the existing I-JEPA trainer; preserve the upstream ImageNet training
-  entry point. Add an encoder-export command or function with strict load
-  validation. Extend embedding cache provenance only as needed to prevent
-  stale token reuse.
-- The command accepts paths to the full checkpoint, raw episodes, manifest,
-  output directory, and an explicit run config. Paths remain external to Git.
+- Add a Wall frame dataset/index and extend the existing `src/train.py`
+  I-JEPA pipeline with a Wall data mode. Reuse its model creation, mask
+  collator, masked-token loss, optimizer schedules, and EMA update. Keep the
+  ImageNet mode working. Add strict initialization from the released full
+  checkpoint without restoring its optimizer, and add Wall validation and
+  checkpoint selection to this same trainer. Add an encoder-export command.
+- The Wall run config names the full checkpoint, raw episodes, manifest, and
+  output directory. Paths remain external to Git.
 - Fail before training on missing episodes, mismatched manifest/episode
   metadata, split leakage, incomplete checkpoint components, incompatible
   architecture, zero selected frames, or existing output with another run
