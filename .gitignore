@@ -51,3 +51,7 @@ src/mylonas_ijepa_wm/wall
 !tests/test_mylonas_ijepa_wall_layout_training.py
 !tests/test_mylonas_ijepa_wall_collision_probes.py
 !tests/test_mylonas_ijepa_wall_planning_matrix.py
+!tests/test_mylonas_ijepa_wall_ijepa_frames.py
+!tests/test_ijepa_wall_checkpoint_init.py
+!tests/test_ijepa_wall_train.py
+!tests/test_mylonas_ijepa_wall_ijepa_export.py
