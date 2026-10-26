@@ -1,0 +1,50 @@
+# Copy this file and set the four /content/drive paths for your Colab session.
+# Run with: python main.py --fname /path/to/copied-config.yaml --devices cuda:0
+meta:
+  model_name: vit_huge
+  pred_depth: 12
+  pred_emb_dim: 384
+  use_bfloat16: true
+  copy_data: false
+  load_checkpoint: false
+  read_checkpoint: null
+  init_checkpoint: /content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.pth.tar
+  seed: 0
+  validation_mask_seed: 12345
+data:
+  dataset: wall
+  raw_dir: /content/drive/MyDrive/datasets/wall_layout_generalization/raw
+  episode_manifest: /content/drive/MyDrive/datasets/wall_layout_generalization/episode_manifest.json
+  frame_stride: 5
+  batch_size: 1
+  crop_size: 224
+  crop_scale: [1.0, 1.0]
+  pin_mem: true
+  num_workers: 0
+  use_gaussian_blur: false
+  use_horizontal_flip: false
+  use_color_distortion: false
+  color_jitter_strength: 0.0
+mask:
+  allow_overlap: false
+  aspect_ratio: [0.75, 1.5]
+  enc_mask_scale: [0.85, 1.0]
+  min_keep: 10
+  num_enc_masks: 1
+  num_pred_masks: 4
+  patch_size: 14
+  pred_mask_scale: [0.15, 0.2]
+optimization:
+  ema: [0.996, 1.0]
+  ipe_scale: 1.0
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  epochs: 20
+  warmup: 2
+  start_lr: 1.0e-6
+  lr: 1.0e-5
+  final_lr: 1.0e-7
+  accumulation_steps: 16
+logging:
+  folder: /content/drive/MyDrive/datasets/wall_ijepa_finetune_1k
+  write_tag: jepa
