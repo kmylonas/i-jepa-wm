@@ -39,13 +39,13 @@ optimization:
   ipe_scale: 1.0
   weight_decay: 0.04
   final_weight_decay: 0.04
-  epochs: 20
-  warmup: 2
+  epochs: 4
+  warmup: 1
   start_lr: 1.0e-6
   lr: 1.0e-5
   final_lr: 1.0e-7
   accumulation_steps: 16
 logging:
   folder: /content/wall_ijepa_finetune/runs/full/logs
-  checkpoint_folder: /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_checkpoints_v1
+  checkpoint_folder: /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_4epoch_checkpoints_v1
   write_tag: jepa

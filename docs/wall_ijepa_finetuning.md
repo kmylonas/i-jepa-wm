@@ -29,7 +29,7 @@ Get this branch into the Colab checkout, mount Drive, and verify that the
 existing manifest, environment config, and full released checkpoint are
 present. Run the notebook from top to bottom. It first renders 15 episodes
 and checks a real one-epoch ViT-H/14 training run before generating the full
-dataset. It copies the released checkpoint and manifest to `/content` for
+dataset and fine-tuning for four epochs. It copies the released checkpoint and manifest to `/content` for
 the run. For a standalone run, edit [the config](../configs/wall_ijepa_finetune.yaml)
 to match your paths, then run from the repository root:
 
@@ -38,7 +38,7 @@ python main.py --fname /content/wall_ijepa_finetune.yaml --devices cuda:0
 ```
 
 The sample config uses batch size 1 and 16 gradient-accumulation batches,
-20 epochs, an online/predictor learning rate of `1e-5`, and the upstream
+four epochs, an online/predictor learning rate of `1e-5`, and the upstream
 spatial mask parameters. It starts a **fresh** optimizer; the ImageNet
 pretraining optimizer is never restored. Validation uses fixed masks and
 frame order. `data.num_workers` must remain zero so mask order and epoch-boundary
@@ -69,8 +69,8 @@ After training, export the selected **online** encoder:
 
 ```bash
 python -m src.mylonas_ijepa_wm.export_wall_ijepa_encoder \
-  --checkpoint /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_checkpoints_v1/jepa-best.pth.tar \
-  --output /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_checkpoints_v1/jepa-best.encoder-only.pth.tar
+  --checkpoint /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_4epoch_checkpoints_v1/jepa-best.pth.tar \
+  --output /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_4epoch_checkpoints_v1/jepa-best.encoder-only.pth.tar
 ```
 
 The output has the `encoder` and `epoch` keys read by the current
