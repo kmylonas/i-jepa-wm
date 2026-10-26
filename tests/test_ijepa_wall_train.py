@@ -123,11 +123,35 @@ def test_wall_mode_uses_existing_train_loop_and_selects_validation_best(tmp_path
 def test_wall_resume_rejects_changed_frame_stride(tmp_path, monkeypatch):
     train, config = _setup(tmp_path, monkeypatch)
     train.main(config)
+    original_params = (tmp_path / "run" / "params-ijepa.yaml").read_bytes()
     changed = copy.deepcopy(config)
     changed["meta"]["load_checkpoint"] = True
     changed["data"]["frame_stride"] = 1
     with pytest.raises(ValueError, match="identity"):
         train.main(changed)
+    assert (tmp_path / "run" / "params-ijepa.yaml").read_bytes() == original_params
+
+
+def test_fresh_wall_run_rejects_existing_output_without_changes(tmp_path, monkeypatch):
+    train, config = _setup(tmp_path, monkeypatch)
+    train.main(config)
+    run = tmp_path / "run"
+    before = {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()}
+    changed = copy.deepcopy(config)
+    changed["data"]["frame_stride"] = 1
+    with pytest.raises(FileExistsError, match="existing Wall run"):
+        train.main(changed)
+    assert {path.name: path.read_bytes() for path in run.iterdir() if path.is_file()} == before
+
+
+def test_wall_resume_rejects_changed_world_size(tmp_path, monkeypatch):
+    train, config = _setup(tmp_path, monkeypatch)
+    train.main(config)
+    monkeypatch.setattr(train, "init_distributed", lambda: (2, 0))
+    resumed = copy.deepcopy(config)
+    resumed["meta"]["load_checkpoint"] = True
+    with pytest.raises(ValueError, match="identity"):
+        train.main(resumed)
 
 
 def test_wall_mode_rejects_nondeterministic_mask_workers(tmp_path, monkeypatch):
@@ -166,6 +190,37 @@ def test_wall_resume_reproduces_uninterrupted_final_weights(tmp_path, monkeypatc
         for key in control[name]:
             torch.testing.assert_close(resumed[name][key], control[name][key], rtol=0, atol=0)
     assert resumed["history"] == control["history"]
+
+
+def test_resume_uses_best_if_final_latest_save_is_interrupted(tmp_path, monkeypatch):
+    train, config = _setup(tmp_path, monkeypatch)
+    original_save = train._atomic_torch_save
+    interrupted = False
+    validation_losses = iter((2.0, 1.0))
+    monkeypatch.setattr(train, "evaluate_wall_loss", lambda *args, **kwargs: next(validation_losses))
+
+    def fail_before_final_latest(value, path):
+        nonlocal interrupted
+        if (not interrupted and str(path).endswith("jepa-latest.pth.tar")
+                and value["epoch"] == config["optimization"]["epochs"]):
+            interrupted = True
+            raise RuntimeError("simulated final save interruption")
+        original_save(value, path)
+
+    monkeypatch.setattr(train, "_atomic_torch_save", fail_before_final_latest)
+    with pytest.raises(RuntimeError, match="final save interruption"):
+        train.main(config)
+    monkeypatch.setattr(train, "_atomic_torch_save", original_save)
+    best = torch.load(tmp_path / "run" / "jepa-best.pth.tar", weights_only=True)
+    assert best["epoch"] == 2
+    resumed_config = copy.deepcopy(config)
+    resumed_config["meta"]["load_checkpoint"] = True
+    train.main(resumed_config)
+    latest = torch.load(tmp_path / "run" / "jepa-latest.pth.tar", weights_only=True)
+    assert latest["epoch"] == 2
+    assert latest["best_val_loss"] == best["val_loss"]
+    assert latest["history"] == best["history"]
+    assert latest["encoder"]["scale"] == best["encoder"]["scale"]
 
 
 def test_wall_validation_reuses_the_same_masks_and_preserves_rng():

@@ -57,7 +57,10 @@ The output directory contains:
 To resume after an epoch, change only `meta.load_checkpoint` from `false` to
 `true` in the same config. Keep all other paths and settings identical. The
 trainer rejects mismatched manifest, released checkpoint, frame stride, or
-run config identity.
+run config identity, including device count and updates per epoch. A fresh
+run requires a new empty output directory. If an interruption occurs after
+the best checkpoint is saved but before the latest checkpoint, resume
+recovers the newer best checkpoint and its history.
 
 After training, export the selected **online** encoder:
 
@@ -77,6 +80,7 @@ weights cannot resume masked-prediction training.
 The ignored 150-episode Wall pilot indexes to 990 training, 220 validation,
 and 440 held-out test frame references at stride five. Tiny-model local tests
 exercise a parameter update, EMA, best-checkpoint selection, exact
-epoch-boundary resume, mismatch rejection, and encoder export through the
+epoch-boundary resume, interrupted checkpoint recovery, mismatch rejection,
+and encoder export through the
 existing embedding loader. A full ViT-H training run and downstream
 world-model evaluation require the full raw dataset and the Colab GPU runtime.

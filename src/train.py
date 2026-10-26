@@ -205,10 +205,7 @@ def main(args, resume_preempt=False):
     folder = args['logging']['folder']
     tag = args['logging']['write_tag']
     Path(folder).mkdir(parents=True, exist_ok=True)
-
     dump = os.path.join(folder, 'params-ijepa.yaml')
-    with open(dump, 'w') as f:
-        yaml.dump(args, f)
     # ----------------------------------------------------------------------- #
 
     try:
@@ -226,18 +223,17 @@ def main(args, resume_preempt=False):
     log_file = os.path.join(folder, f'{tag}_r{rank}.csv')
     save_path = os.path.join(folder, f'{tag}' + '-ep{epoch}.pth.tar')
     latest_path = os.path.join(folder, f'{tag}-latest.pth.tar')
+    best_path = Path(folder) / f'{tag}-best.pth.tar'
+    if is_wall and not load_model:
+        existing = [Path(folder) / name for name in (
+            'params-ijepa.yaml', 'frame_index.json', 'history.json',
+            f'{tag}-latest.pth.tar', f'{tag}-best.pth.tar',
+        )]
+        if any(path.exists() for path in existing):
+            raise FileExistsError(f'existing Wall run in {folder}; choose a new logging.folder or resume')
     load_path = None
     if load_model:
         load_path = os.path.join(folder, r_file) if r_file is not None else latest_path
-
-    # -- make csv_logger
-    csv_logger = CSVLogger(log_file,
-                           ('%d', 'epoch'),
-                           ('%d', 'itr'),
-                           ('%.5f', 'loss'),
-                           ('%.5f', 'mask-A'),
-                           ('%.5f', 'mask-B'),
-                           ('%d', 'time (ms)'))
 
     # -- init model
     encoder, predictor = init_model(
@@ -284,8 +280,6 @@ def main(args, resume_preempt=False):
             collate_fn=mask_collator, pin_memory=pin_mem,
             num_workers=num_workers, drop_last=True,
         )
-        if rank == 0:
-            Path(folder, 'frame_index.json').write_text(json.dumps(wall_index, indent=2))
     else:
         transform = make_transforms(
             crop_size=crop_size, crop_scale=crop_scale,
@@ -333,6 +327,7 @@ def main(args, resume_preempt=False):
     history = []
     optimizer_updates = 0
     wall_identity = None
+    recover_latest = False
     if is_wall:
         wall_identity = {
             'manifest_sha256': wall_index['manifest_sha256'],
@@ -340,11 +335,29 @@ def main(args, resume_preempt=False):
             'frame_index_sha256': _json_hash(wall_index),
             'config_sha256': _wall_config_identity(args),
             'frame_stride': wall_index['frame_stride'],
+            'world_size': world_size,
+            'optimizer_updates_per_epoch': ipe,
         }
     # -- load training checkpoint
     if load_model:
         if is_wall:
-            checkpoint = torch.load(load_path, map_location='cpu', weights_only=True)
+            checkpoint_path = Path(load_path)
+            if r_file is None and best_path.is_file():
+                if checkpoint_path.is_file():
+                    latest_checkpoint = torch.load(
+                        checkpoint_path, map_location='cpu', weights_only=True, mmap=True)
+                    best_checkpoint = torch.load(
+                        best_path, map_location='cpu', weights_only=True, mmap=True)
+                    recover_latest = best_checkpoint['epoch'] > latest_checkpoint['epoch']
+                    checkpoint = best_checkpoint if recover_latest else latest_checkpoint
+                    del best_checkpoint, latest_checkpoint
+                else:
+                    checkpoint = torch.load(
+                        best_path, map_location='cpu', weights_only=True, mmap=True)
+                    recover_latest = True
+            else:
+                checkpoint = torch.load(
+                    checkpoint_path, map_location='cpu', weights_only=True, mmap=True)
             if checkpoint.get('wall_run_identity') != wall_identity:
                 raise ValueError('Wall run identity differs from saved checkpoint')
             for name, model in (
@@ -375,6 +388,25 @@ def main(args, resume_preempt=False):
                 wd_scheduler.step()
                 next(momentum_scheduler)
                 mask_collator.step()
+
+    # Persist run metadata only after a fresh-output check or successful resume validation.
+    if rank == 0:
+        if recover_latest:
+            _atomic_torch_save(checkpoint, latest_path)
+            temporary = Path(folder) / 'history.json.tmp'
+            temporary.write_text(json.dumps(history, indent=2))
+            temporary.replace(Path(folder) / 'history.json')
+        with open(dump, 'w') as f:
+            yaml.dump(args, f)
+        if is_wall:
+            Path(folder, 'frame_index.json').write_text(json.dumps(wall_index, indent=2))
+    csv_logger = CSVLogger(log_file,
+                           ('%d', 'epoch'),
+                           ('%d', 'itr'),
+                           ('%.5f', 'loss'),
+                           ('%.5f', 'mask-A'),
+                           ('%.5f', 'mask-B'),
+                           ('%d', 'time (ms)'))
 
     def save_checkpoint(epoch):
         save_dict = {
@@ -411,9 +443,9 @@ def main(args, resume_preempt=False):
             'wall_run_identity': wall_identity,
             'history': history,
         }
-        _atomic_torch_save(save_dict, latest_path)
         if improved:
-            _atomic_torch_save(save_dict, Path(folder) / f'{tag}-best.pth.tar')
+            _atomic_torch_save(save_dict, best_path)
+        _atomic_torch_save(save_dict, latest_path)
         temporary = Path(folder) / 'history.json.tmp'
         temporary.write_text(json.dumps(history, indent=2))
         temporary.replace(Path(folder) / 'history.json')
