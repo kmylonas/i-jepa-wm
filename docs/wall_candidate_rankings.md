@@ -12,6 +12,12 @@ from a fresh simulator reset. The terminal real frame and goal frame are
 encoded with the *same* I-JEPA 1K encoder used for model training. The saved
 predicted and real latent MSE values can therefore be compared directly.
 
+The figures compare **sampled** CEM candidates. Latent-cost planning now
+returns the mean of the final elites by default, so `predicted_best_true_cost`
+describes the old best-sampled selection rule, not the action sequence that a
+new planning run would execute. Use `--cem-selection best` in `plan_proprio`
+to reproduce that older rule; omit the flag for the elite-mean default.
+
 The default test uses the seen Wall layout `(32, 30)`, three far start–goal
 pairs on opposite sides of the wall, horizons 1 and 5, and a Euclidean action
 length cap of 3.5 per primitive action. This matches the multi Wall model's
@@ -111,7 +117,7 @@ display(Image(filename=str(
 
 The three starts and each candidate sequence are fixed by saved seeds and
 action archives. A large difference between predicted and real rankings
-indicates that world-model predictions distort CEM's choices. A weak
+indicates that world-model predictions distort CEM's sampled candidates. A weak
 relationship between *real* latent cost and actual progress points to the
 encoder goal cost instead. If both relationships are strong yet planning
 still fails, inspect CEM search and replanning limits.

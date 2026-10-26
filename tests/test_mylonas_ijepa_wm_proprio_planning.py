@@ -23,9 +23,16 @@ class StateDrivenModel(torch.nn.Module):
 
 
 class ProprioPlanningTest(unittest.TestCase):
+    def test_cli_accepts_cem_selection_override(self):
+        args = plan_pointmaze_proprio.parse_args([
+            "--world-model-checkpoint", "unused.pt",
+            "--cem-selection", "best",
+        ])
+        self.assertEqual(args.cem_selection, "best")
+
     def test_latent_planner_exposes_scored_cem_candidates(self):
         observed = []
-        plan_pointmaze_proprio.plan_action(
+        result = plan_pointmaze_proprio.plan_action(
             model=StateDrivenModel(),
             latent_history=torch.zeros(1, 1, 1),
             state_history=torch.zeros(1, 4),
@@ -46,6 +53,34 @@ class ProprioPlanningTest(unittest.TestCase):
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0][1].shape, (4, 1, 1))
         self.assertEqual(observed[0][2].shape, (4,))
+        actions, costs = observed[0][1:]
+        expected = actions[costs.argsort()[:2]].mean(dim=0)
+        torch.testing.assert_close(result.action_sequence, expected)
+
+    def test_latent_planner_can_explicitly_select_best_sample(self):
+        observed = []
+        result = plan_pointmaze_proprio.plan_action(
+            model=StateDrivenModel(),
+            latent_history=torch.zeros(1, 1, 1),
+            state_history=torch.zeros(1, 4),
+            action_history=torch.empty(0, 1),
+            target_latent=torch.zeros(1, 1),
+            action_low=torch.tensor([-2.0]),
+            action_high=torch.tensor([2.0]),
+            device=torch.device("cpu"),
+            planning_horizon=1,
+            population=4,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=4,
+            generator=torch.Generator().manual_seed(7),
+            cem_selection="best",
+            candidate_observer=lambda iteration, actions, costs: observed.append(
+                (actions, costs)
+            ),
+        )
+        actions, costs = observed[0]
+        torch.testing.assert_close(result.action_sequence, actions[costs.argmin()])
 
     def test_cli_loads_checkpoint_and_writes_episode_results(self):
         class TinyEncoder(torch.nn.Module):
@@ -114,6 +149,7 @@ class ProprioPlanningTest(unittest.TestCase):
         torch.testing.assert_close(costs, torch.tensor([0.0, 2.0]))
 
     def test_position_planner_scores_world_model_states(self):
+        observed = []
         plan = plan_pointmaze_proprio.plan_action(
             model=StateDrivenModel(),
             latent_history=torch.zeros(1, 1, 1),
@@ -133,8 +169,15 @@ class ProprioPlanningTest(unittest.TestCase):
             state_mean=torch.tensor([10.0, 20.0, 0.0, 0.0]),
             state_std=torch.tensor([2.0, 4.0, 1.0, 1.0]),
             generator=torch.Generator().manual_seed(0),
+            candidate_observer=lambda iteration, actions, costs: observed.append(
+                (actions, costs)
+            ),
         )
         self.assertAlmostEqual(plan.action_sequence[0, 0].item(), 1.5, delta=0.2)
+        final_actions, final_costs = observed[-1]
+        torch.testing.assert_close(
+            plan.action_sequence, final_actions[final_costs.argmin()]
+        )
 
     def test_candidate_rollout_updates_predicted_proprioception(self):
         visual, states = plan_pointmaze_proprio.rollout_action_sequences(

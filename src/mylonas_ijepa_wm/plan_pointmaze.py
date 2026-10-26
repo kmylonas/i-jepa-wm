@@ -118,6 +118,10 @@ def parse_args(argv=None):
         default="probe",
     )
     parser.add_argument(
+        "--cem-selection", choices=["best", "elite_mean"],
+        help="Choose the returned CEM sequence (default: elite_mean for latent cost, best otherwise).",
+    )
+    parser.add_argument(
         "--environment-id",
         default="PointMaze_UMaze-v3",
     )
@@ -466,6 +470,7 @@ def plan_action(
     precision="fp32",
     min_std=0.05,
     generator=None,
+    cem_selection=None,
 ):
     latent_history = latent_history.unsqueeze(0)
     action_low = action_low.to(device=device, dtype=torch.float32)
@@ -504,6 +509,10 @@ def plan_action(
         num_iterations=num_iterations,
         min_std=min_std,
         generator=generator,
+        selection=(
+            cem_selection if cem_selection is not None
+            else "elite_mean" if cost_mode == "latent" else "best"
+        ),
     )
 
 
@@ -614,6 +623,7 @@ def run_planning_episode(
     planner_fn=plan_action,
     frame_callback=None,
     collect_failure_diagnostic=False,
+    cem_selection=None,
 ):
     if collect_failure_diagnostic and (
         position_probe is None
@@ -714,6 +724,7 @@ def run_planning_episode(
             precision=precision,
             min_std=min_std,
             generator=generator,
+            cem_selection=cem_selection,
         )
         if (
             collect_failure_diagnostic
@@ -1271,6 +1282,7 @@ def main(argv=None):
                 collect_failure_diagnostic=(
                     args.failure_diagnostics_dir is not None
                 ),
+                cem_selection=args.cem_selection,
             )
             record["video_path"] = None
             if video_frames is not None:
@@ -1323,6 +1335,9 @@ def main(argv=None):
             "camera": args.camera,
             "physics_frame_skip": physics_frame_skip,
             "cost": args.cost,
+            "cem_selection": args.cem_selection or (
+                "elite_mean" if args.cost == "latent" else "best"
+            ),
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,
             "max_macro_steps": args.max_macro_steps,

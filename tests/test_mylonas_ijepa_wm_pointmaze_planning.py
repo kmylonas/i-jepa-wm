@@ -350,6 +350,28 @@ class FirstTokenPositionProbe(torch.nn.Module):
 
 
 class PlanActionTest(unittest.TestCase):
+    def test_latent_planner_defaults_to_mean_of_final_elites(self):
+        seed = 14
+        sampled = torch.randn(2, 1, 10, generator=torch.Generator().manual_seed(seed))
+        expected = sampled.clamp(-1.0, 1.0).mean(dim=0)
+        result = plan_pointmaze.plan_action(
+            model=FirstActionWorldModel(),
+            latent_history=torch.zeros(3, 1, 1),
+            action_history=torch.zeros(2, 10),
+            target_latent=torch.tensor([[0.5]]),
+            device=torch.device("cpu"),
+            cost_mode="latent",
+            action_low=torch.full((10,), -1.0),
+            action_high=torch.full((10,), 1.0),
+            planning_horizon=1,
+            population=2,
+            num_elites=2,
+            num_iterations=1,
+            candidate_batch_size=2,
+            generator=torch.Generator().manual_seed(seed),
+        )
+        torch.testing.assert_close(result.action_sequence, expected)
+
     def test_optimizes_and_returns_complete_bounded_macro_sequence(self):
         latent_history = torch.zeros(3, 1, 1)
         action_history = torch.zeros(2, 10)
@@ -922,6 +944,12 @@ class FailureDiagnosticOutputTest(unittest.TestCase):
 
 
 class PlanningParserTest(unittest.TestCase):
+    def test_cli_accepts_cem_selection_override(self):
+        self.assertEqual(
+            plan_pointmaze.parse_args(["--cem-selection", "best"]).cem_selection,
+            "best",
+        )
+
     def test_actions_per_plan_defaults_to_one_and_cannot_exceed_horizon(self):
         self.assertEqual(plan_pointmaze.parse_args([]).actions_per_plan, 1)
         with tempfile.TemporaryDirectory() as temporary_directory:

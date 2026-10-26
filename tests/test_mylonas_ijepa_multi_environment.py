@@ -178,6 +178,14 @@ class MultiEnvironmentTest(unittest.TestCase):
                     ])
                 self.assertIn("positive finite", stderr.getvalue())
 
+    def test_wall_cli_can_restore_best_sample_selection(self):
+        args = plan_proprio.parse_args([
+            "--env", "wall", "--world-model-checkpoint", "unused.pt",
+            "--output", "unused.json", "--cost", "latent",
+            "--cem-selection", "best",
+        ])
+        self.assertEqual(args.cem_selection, "best")
+
     def test_collector_can_fill_a_dataset_in_ranges(self):
         with tempfile.TemporaryDirectory() as directory:
             common = [

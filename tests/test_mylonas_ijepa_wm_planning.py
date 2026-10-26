@@ -89,6 +89,32 @@ class CandidateObservationTest(unittest.TestCase):
             self.assertLessEqual(float(actions.abs().max()), 0.5)
             torch.testing.assert_close(costs, actions[:, 0, 0].square())
 
+    def test_elite_mean_returns_final_mean_with_its_own_score(self):
+        observed = []
+
+        def score(actions):
+            return actions[:, 0, 0].square()
+
+        result = planning.cem_optimize(
+            score_fn=score,
+            horizon=1,
+            action_dim=1,
+            action_low=torch.tensor([-10.0]),
+            action_high=torch.tensor([10.0]),
+            population=8,
+            num_elites=3,
+            num_iterations=2,
+            generator=torch.Generator().manual_seed(4),
+            selection="elite_mean",
+            candidate_observer=lambda iteration, actions, costs: observed.append(
+                (actions, costs)
+            ),
+        )
+        final_actions, final_costs = observed[-1]
+        expected = final_actions[final_costs.argsort()[:3]].mean(dim=0)
+        torch.testing.assert_close(result.action_sequence, expected)
+        self.assertAlmostEqual(result.cost, score(expected.unsqueeze(0)).item(), places=6)
+
 
 class CandidateRolloutTest(unittest.TestCase):
     def test_chunked_rollout_preserves_candidate_order(self):

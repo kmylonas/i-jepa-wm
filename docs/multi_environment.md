@@ -5,6 +5,12 @@ embedding, training, and planning. PointMaze remains the default in the old
 scripts. The new `plan_proprio` command shares the existing model and CEM
 implementation but chooses a runtime adapter by environment.
 
+For `--cost latent`, CEM now executes the mean sequence of the final elites,
+as in DINO-WM. Position-cost planning still executes the lowest-cost sampled
+sequence. Pass `--cem-selection best` to reproduce the previous latent-cost
+behavior, or `--cem-selection elite_mean` to request averaging explicitly.
+The result JSON records the selection rule under `configuration.cem_selection`.
+
 ## Configurations
 
 Use [pointmaze_physics5.json](../configs/pointmaze_physics5.json) for the

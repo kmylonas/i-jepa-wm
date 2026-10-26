@@ -9,6 +9,10 @@ from the world model. CEM can score candidates using either predicted terminal
 patch tokens against the encoded goal image (`--cost latent`) or the world
 model's predicted terminal `(x, y)` against the simulator goal position
 (`--cost position`). It does not use a position probe.
+Latent-cost CEM returns the mean of its final elite action sequences by
+default; position cost returns the best sampled sequence. Use
+`--cem-selection best` to repeat older latent-cost runs with the original
+selection rule.
 
 The original `wm.py`, `vit.py`, and `plan_pointmaze.py` remain available for
 vision-only experiments. Proprioceptive runs use separate checkpoints and

@@ -279,7 +279,10 @@ def cem_optimize(
     generator=None,
     candidate_transform=None,
     candidate_observer=None,
+    selection="best",
 ):
+    if selection not in {"best", "elite_mean"}:
+        raise ValueError("selection must be 'best' or 'elite_mean'")
     _validate_cem_arguments(
         horizon=horizon,
         action_dim=action_dim,
@@ -350,7 +353,9 @@ def cem_optimize(
         best_actions = candidates[best_index].clone()
         best_cost = costs[best_index].item()
 
-    return CEMResult(
-        action_sequence=best_actions,
-        cost=best_cost,
-    )
+    if selection == "elite_mean":
+        mean_cost = score_fn(mean.unsqueeze(0))
+        if mean_cost.shape != (1,):
+            raise ValueError("score_fn must return one cost per candidate")
+        return CEMResult(action_sequence=mean.clone(), cost=mean_cost[0].item())
+    return CEMResult(action_sequence=best_actions, cost=best_cost)

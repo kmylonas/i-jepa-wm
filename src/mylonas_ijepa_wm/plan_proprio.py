@@ -35,6 +35,10 @@ def parse_args(argv=None):
     parser.add_argument("--video-dir", type=Path)
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument("--cost", choices=["latent", "position"], default="latent")
+    parser.add_argument(
+        "--cem-selection", choices=["best", "elite_mean"],
+        help="Choose the returned CEM sequence (default: elite_mean for latent cost, best for position cost).",
+    )
     parser.add_argument("--num-episodes", type=int, default=20)
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument("--max-macro-steps", type=int, default=20)
@@ -105,6 +109,7 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
             state_mean=state_mean, state_std=state_std,
             max_action_length=getattr(args, "max_action_length", None),
             micro_action_dim=config.micro_action_dim,
+            cem_selection=getattr(args, "cem_selection", None),
         )
         for macro in plan.action_sequence[:min(args.actions_per_plan, args.max_macro_steps - len(actions))]:
             macro = macro.detach().cpu().numpy().astype(np.float32)
@@ -218,6 +223,9 @@ def main(argv=None):
             "encoder_checkpoint": str(args.encoder_checkpoint),
             "checkpoint_epoch": epoch,
             "cost": args.cost,
+            "cem_selection": args.cem_selection or (
+                "elite_mean" if args.cost == "latent" else "best"
+            ),
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,
             "max_macro_steps": args.max_macro_steps,

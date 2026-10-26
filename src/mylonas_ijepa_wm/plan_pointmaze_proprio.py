@@ -33,6 +33,10 @@ def parse_args(argv=None):
         default=None,
     )
     parser.add_argument("--cost", choices=["latent", "position"], default="latent")
+    parser.add_argument(
+        "--cem-selection", choices=["best", "elite_mean"],
+        help="Choose the returned CEM sequence (default: elite_mean for latent cost, best for position cost).",
+    )
     parser.add_argument("--video-dir", type=Path)
     parser.add_argument("--video-fps", type=int, default=10)
     parser.add_argument("--plan-trace-dir", type=Path)
@@ -153,6 +157,7 @@ def plan_action(
     max_action_length=None,
     micro_action_dim=2,
     candidate_observer=None,
+    cem_selection=None,
 ):
     if cost not in {"latent", "position"}:
         raise ValueError(f"unknown cost mode: {cost}")
@@ -218,6 +223,10 @@ def plan_action(
         generator=generator,
         candidate_transform=limit_action_lengths if max_action_length is not None else None,
         candidate_observer=candidate_observer,
+        selection=(
+            cem_selection if cem_selection is not None
+            else "elite_mean" if cost == "latent" else "best"
+        ),
     )
 
 
@@ -244,6 +253,7 @@ def run_planning_episode(
     frame_callback=None,
     cost="latent",
     collect_plan_traces=False,
+    cem_selection=None,
 ):
     if not 1 <= actions_per_plan <= planning_horizon:
         raise ValueError("actions_per_plan must be between 1 and planning_horizon")
@@ -307,6 +317,7 @@ def run_planning_episode(
             goal_position=goal_position,
             state_mean=state_mean,
             state_std=state_std,
+            cem_selection=cem_selection,
         )
         trace = None
         if collect_plan_traces:
@@ -543,6 +554,7 @@ def main(argv=None):
                 frame_callback=frames.append if frames is not None else None,
                 cost=args.cost,
                 collect_plan_traces=args.plan_trace_dir is not None,
+                cem_selection=args.cem_selection,
             )
             if args.plan_trace_dir is not None:
                 record["plan_trace_plots"] = [str(path) for path in
@@ -579,6 +591,9 @@ def main(argv=None):
             "camera": "topdown",
             "physics_frame_skip": physics_frame_skip,
             "cost": args.cost,
+            "cem_selection": args.cem_selection or (
+                "elite_mean" if args.cost == "latent" else "best"
+            ),
             "environment_id": args.environment_id,
             "num_episodes": args.num_episodes,
             "base_seed": args.base_seed,
