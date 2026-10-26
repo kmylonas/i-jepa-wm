@@ -205,6 +205,7 @@ def main(args, resume_preempt=False):
     folder = args['logging']['folder']
     tag = args['logging']['write_tag']
     Path(folder).mkdir(parents=True, exist_ok=True)
+    checkpoint_folder = args['logging'].get('checkpoint_folder', folder) if is_wall else folder
     dump = os.path.join(folder, 'params-ijepa.yaml')
     # ----------------------------------------------------------------------- #
 
@@ -222,18 +223,21 @@ def main(args, resume_preempt=False):
     # -- log/checkpointing paths
     log_file = os.path.join(folder, f'{tag}_r{rank}.csv')
     save_path = os.path.join(folder, f'{tag}' + '-ep{epoch}.pth.tar')
-    latest_path = os.path.join(folder, f'{tag}-latest.pth.tar')
-    best_path = Path(folder) / f'{tag}-best.pth.tar'
+    latest_path = os.path.join(checkpoint_folder, f'{tag}-latest.pth.tar')
+    best_path = Path(checkpoint_folder) / f'{tag}-best.pth.tar'
     if is_wall and not load_model:
         existing = [Path(folder) / name for name in (
-            'params-ijepa.yaml', 'frame_index.json', 'history.json',
-            f'{tag}-latest.pth.tar', f'{tag}-best.pth.tar',
-        )]
+            'params-ijepa.yaml', 'frame_index.json', 'history.json')]
+        existing.extend((Path(latest_path), best_path))
         if any(path.exists() for path in existing):
-            raise FileExistsError(f'existing Wall run in {folder}; choose a new logging.folder or resume')
+            raise FileExistsError(
+                f'existing Wall run in {folder} or {checkpoint_folder}; '
+                'choose new output folders or resume')
+    Path(checkpoint_folder).mkdir(parents=True, exist_ok=True)
     load_path = None
     if load_model:
-        load_path = os.path.join(folder, r_file) if r_file is not None else latest_path
+        load_path = (os.path.join(checkpoint_folder if is_wall else folder, r_file)
+                     if r_file is not None else latest_path)
 
     # -- init model
     encoder, predictor = init_model(
@@ -393,6 +397,7 @@ def main(args, resume_preempt=False):
     if rank == 0:
         if recover_latest:
             _atomic_torch_save(checkpoint, latest_path)
+        if is_wall and load_model:
             temporary = Path(folder) / 'history.json.tmp'
             temporary.write_text(json.dumps(history, indent=2))
             temporary.replace(Path(folder) / 'history.json')

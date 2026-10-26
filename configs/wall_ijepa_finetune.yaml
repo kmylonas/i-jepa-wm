@@ -1,5 +1,5 @@
-# Copy this file and set the four /content/drive paths for your Colab session.
-# Run with: python main.py --fname /path/to/copied-config.yaml --devices cuda:0
+# The Colab notebook overrides these paths for local generation and checkpoint-only Drive storage.
+# Standalone run: python main.py --fname /path/to/copied-config.yaml --devices cuda:0
 meta:
   model_name: vit_huge
   pred_depth: 12
@@ -13,7 +13,7 @@ meta:
   validation_mask_seed: 12345
 data:
   dataset: wall
-  raw_dir: /content/drive/MyDrive/datasets/wall_layout_generalization/raw
+  raw_dir: /content/wall_ijepa_finetune/full/raw
   episode_manifest: /content/drive/MyDrive/datasets/wall_layout_generalization/episode_manifest.json
   frame_stride: 5
   batch_size: 1
@@ -46,5 +46,6 @@ optimization:
   final_lr: 1.0e-7
   accumulation_steps: 16
 logging:
-  folder: /content/drive/MyDrive/datasets/wall_ijepa_finetune_1k
+  folder: /content/wall_ijepa_finetune/runs/full/logs
+  checkpoint_folder: /content/drive/MyDrive/datasets/wall_layout_generalization/ijepa_finetune_checkpoints_v1
   write_tag: jepa

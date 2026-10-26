@@ -1,5 +1,6 @@
 import copy
 import json
+import shutil
 
 import pytest
 import torch
@@ -152,6 +153,29 @@ def test_wall_resume_rejects_changed_world_size(tmp_path, monkeypatch):
     resumed["meta"]["load_checkpoint"] = True
     with pytest.raises(ValueError, match="identity"):
         train.main(resumed)
+
+
+def test_wall_checkpoints_separate_from_local_artifacts_and_resume(tmp_path, monkeypatch):
+    train, config = _setup(tmp_path, monkeypatch)
+    checkpoint_dir = tmp_path / "persistent_checkpoints"
+    config["logging"]["checkpoint_folder"] = str(checkpoint_dir)
+    train.main(config)
+
+    local_run = tmp_path / "run"
+    assert sorted(path.name for path in checkpoint_dir.iterdir()) == [
+        "jepa-best.pth.tar", "jepa-latest.pth.tar"]
+    assert not list(local_run.glob("*.pth.tar"))
+    assert (local_run / "history.json").is_file()
+    assert (local_run / "frame_index.json").is_file()
+
+    shutil.rmtree(local_run)
+    with pytest.raises(FileExistsError, match="existing Wall run"):
+        train.main(config)
+    resumed = copy.deepcopy(config)
+    resumed["meta"]["load_checkpoint"] = True
+    train.main(resumed)
+    assert (local_run / "history.json").is_file()
+    assert torch.load(checkpoint_dir / "jepa-latest.pth.tar", weights_only=True)["epoch"] == 2
 
 
 def test_wall_mode_rejects_nondeterministic_mask_workers(tmp_path, monkeypatch):
