@@ -33,3 +33,21 @@ def test_notebook_embeds_pinned_source_patch():
     assert "BASE_COMMIT =" in source
     assert "PATCH_SHA256 =" in source
     assert '"git", "apply"' in source
+
+
+def test_notebook_resume_checks_remaining_cache_and_repairs_bad_pairs():
+    notebook = json.loads(NOTEBOOK.read_text())
+    source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert "missing_cache_count * LATENT_EPISODE_BYTES" in source
+    assert "EPISODES * LATENT_EPISODE_BYTES" not in source
+    assert 'latent_path.unlink(missing_ok=True)' in source
+    assert 'trajectory_path.unlink(missing_ok=True)' in source
+
+
+def test_notebook_checks_current_identity_and_pilot_actions():
+    notebook = json.loads(NOTEBOOK.read_text())
+    source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert 'assert json.loads(identity_path.read_text()) == expected_identity(mode)' in source
+    assert 'assert complete["identity"] == expected_identity(mode)' in source
+    assert 'compare_action_hashes(pilot_train_audits["fixed"], pilot_train_audits["multi"])' in source
+    assert 'pilot_coverage.json' in source
