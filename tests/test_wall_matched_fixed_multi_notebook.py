@@ -1,5 +1,10 @@
+import ast
 import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks/wall_matched_fixed_multi_colab.ipynb"
@@ -61,3 +66,27 @@ def test_notebook_requires_encoder_only_checkpoint():
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
     assert 'ENCODER_DRIVE = Path("/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar")' in source
     assert 'IN1K-vit.h.14-300e.pth.tar' not in source
+
+
+def test_notebook_streams_child_logs_and_reports_training_steps():
+    notebook = json.loads(NOTEBOOK.read_text())
+    source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert 'subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE,' in source
+    assert 'stderr=subprocess.STDOUT' in source
+    assert 'print(line, end="", flush=True)' in source
+    assert '"--log-every", "100"' in source
+
+
+def test_notebook_command_runner_relays_both_streams_and_failures(capsys):
+    notebook = json.loads(NOTEBOOK.read_text())
+    setup = ast.parse("".join(notebook["cells"][1]["source"]))
+    shell_node = next(node for node in setup.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "shell")
+    namespace = {"subprocess": subprocess}
+    exec(compile(ast.Module(body=[shell_node], type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
+    namespace["shell"]([sys.executable, "-u", "-c",
+                        "import sys; print('stdout-line'); print('stderr-line', file=sys.stderr)"])
+    output = capsys.readouterr().out
+    assert "stdout-line" in output and "stderr-line" in output
+    with pytest.raises(subprocess.CalledProcessError):
+        namespace["shell"]([sys.executable, "-u", "-c", "raise SystemExit(7)"])
