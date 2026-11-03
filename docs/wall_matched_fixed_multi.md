@@ -1,0 +1,20 @@
+# Matched fixed versus multi-layout Wall run
+
+Open [`notebooks/wall_matched_fixed_multi_colab.ipynb`](../notebooks/wall_matched_fixed_multi_colab.ipynb) in Google Colab, choose a GPU runtime with at least about 95 GiB of free local disk, and run cells in order. The notebook contains the source changes needed on top of pinned `wall-layout-generalization` commit `37a3e4e9b086319b050eb1dd3d3a2eb9e42c3eaa`; uploading the notebook alone is sufficient. It clones DotWall and checks out commit `0a9492fa12044b852ae9e001cc74604b79c8bb0c`.
+
+The encoder is loaded from the first existing path among:
+
+- `/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.pth.tar`
+- `/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar`
+
+The new Drive root is `/content/drive/MyDrive/datasets/wall_matched_fixed_multi_v1`. Each of its `fixed/` and `multi/` directories receives a manifest, environment config, coverage audit, run identity, `world_model/best.pt`, `world_model/last.pt`, validation/test rollout JSON, collision and visual-pair JSON, a default-layout sanity planning JSON, and a completion marker. The final paired planning results are in `matched_planning/matrix_summary.json` and its per-layout JSON files. Drive holds no raw episodes, frames, latent caches, or trajectory sidecars.
+
+The local runtime root is `/content/wall_matched_fixed_multi_v1`. For each model the notebook collects 2,600 episodes (2,000 train, 200 validation, 400 test), audits the full raw dataset, embeds it with stride 1 in 100-episode batches, and deletes a batch's raw files only after checking the latent shape and sidecar identity. It trains and evaluates the fixed model, verifies its Drive outputs, deletes the entire local fixed dataset/cache, and only then starts the multi dataset. It repeats the cleanup after the multi model. Each dense cache is about 81 GiB; all raw images at once are about 19 GiB. The notebook checks free disk before collection and embedding.
+
+Both training datasets use the correlated-heading `wide` policy with uniformly sampled primitive-action lengths in `[0.2, 3.5]`; no doorway-directed episodes are included. The fixed training layout is `[32, 30]`, the simulator default. The multi training layouts are `[24, 32, 40] × [18, 30, 42]`. Both models use identical validation/test assignments and seeds. The second audit compares action hashes against the first audit after the first raw dataset has been removed. Coverage thresholds are checked before embedding; a failure stops the notebook for inspection rather than changing the collection policy.
+
+Both models start from random world-model weights with seed 42, the same frozen I-JEPA encoder, one-step loss, `num_hist=1`, batch size 8, and at most 100 epochs. Their train-only action and state normalization statistics can differ because their training states differ. The shared held-out validation layouts select `best.pt`; the test layouts do not select the checkpoint.
+
+Planning uses position cost, horizon 5, five macro actions executed per plan, 300 CEM candidates, 30 elites, ten iterations, and a primitive-action Euclidean cap of 3.5. The primary comparison uses 50 matched seeds on each of four held-out layouts (200 paired environment episodes). The paired bootstrap resamples 50 seed IDs while keeping each seed's four layouts together. The same 20 seeds on `[32, 30]` provide an in-distribution sanity check. These are proprioceptive models, so planning success alone does not establish vision-only control.
+
+If a Colab runtime resets, raw episodes and caches vanish. Rerun the notebook; the same Drive manifests reconstruct those datasets locally and the world-model trainer resumes from its saved `last.pt`. The notebook checks a completion marker before skipping a finished model. A reset may require substantial re-embedding time, even when its checkpoint is already on Drive.
