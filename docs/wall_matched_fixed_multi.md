@@ -1,6 +1,6 @@
 # Matched fixed versus multi-layout Wall run
 
-Open [`notebooks/wall_matched_fixed_multi_colab.ipynb`](../notebooks/wall_matched_fixed_multi_colab.ipynb) in Google Colab, choose a GPU runtime with at least about 95 GiB of free local disk, and run cells in order. The notebook contains the source changes needed on top of pinned `wall-layout-generalization` commit `37a3e4e9b086319b050eb1dd3d3a2eb9e42c3eaa`; uploading the notebook alone is sufficient. It clones DotWall and checks out commit `0a9492fa12044b852ae9e001cc74604b79c8bb0c`.
+Open [`notebooks/wall_matched_fixed_multi_colab.ipynb`](../notebooks/wall_matched_fixed_multi_colab.ipynb) in Google Colab, choose a GPU runtime with at least about 95 GiB of free local disk, and run cells in order. The notebook clones the `wall-layout-generalization` GitHub branch and checks out source commit `82b08453f3ee8f0913da851cfeb98b296c9e90af`; uploading the notebook alone is sufficient. It clones DotWall and checks out commit `0a9492fa12044b852ae9e001cc74604b79c8bb0c`.
 
 The encoder is loaded from the first existing path among:
 

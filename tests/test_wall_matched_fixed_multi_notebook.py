@@ -27,12 +27,14 @@ def test_uploadable_notebook_contains_sequential_runtime_only_data_flow():
     assert 'assert audit["coverage_pass"]' in source
 
 
-def test_notebook_embeds_pinned_source_patch():
+def test_notebook_checks_out_pushed_source_commit_without_embedded_patch():
     notebook = json.loads(NOTEBOOK.read_text())
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
-    assert "BASE_COMMIT =" in source
-    assert "PATCH_SHA256 =" in source
-    assert '"git", "apply"' in source
+    assert 'SOURCE_COMMIT = "82b08453f3ee8f0913da851cfeb98b296c9e90af"' in source
+    assert '"git", "checkout", SOURCE_COMMIT' in source
+    assert "PATCH_B64" not in source
+    assert "PATCH_SHA256" not in source
+    assert '"git", "apply"' not in source
 
 
 def test_notebook_resume_checks_remaining_cache_and_repairs_bad_pairs():
