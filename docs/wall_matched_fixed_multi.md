@@ -2,10 +2,7 @@
 
 Open [`notebooks/wall_matched_fixed_multi_colab.ipynb`](../notebooks/wall_matched_fixed_multi_colab.ipynb) in Google Colab, choose a GPU runtime with at least about 95 GiB of free local disk, and run cells in order. The notebook clones the `wall-layout-generalization` GitHub branch and checks out source commit `82b08453f3ee8f0913da851cfeb98b296c9e90af`; uploading the notebook alone is sufficient. It clones DotWall and checks out commit `0a9492fa12044b852ae9e001cc74604b79c8bb0c`.
 
-The encoder is loaded from the first existing path among:
-
-- `/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.pth.tar`
-- `/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar`
+The frozen encoder is loaded from `/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar`. The notebook copies this checkpoint to the runtime disk; it does not need the full I-JEPA training checkpoint.
 
 The new Drive root is `/content/drive/MyDrive/datasets/wall_matched_fixed_multi_v2`. Each of its `fixed/` and `multi/` directories receives a manifest, environment config, pilot and full coverage audits, run identity, `world_model/best.pt`, `world_model/last.pt`, validation/test rollout JSON, collision and visual-pair JSON, a default-layout sanity planning JSON, and a completion marker. The final paired planning results are in `matched_planning/matrix_summary.json` and its per-layout JSON files. Drive holds no raw episodes, frames, latent caches, or trajectory sidecars.
 

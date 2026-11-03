@@ -54,3 +54,10 @@ def test_notebook_checks_current_identity_and_pilot_actions():
     assert 'compare_matched_action_hashes(' in source
     assert 'shared_seeds=range(100000, 100010)' in source
     assert 'pilot_coverage.json' in source
+
+
+def test_notebook_requires_encoder_only_checkpoint():
+    notebook = json.loads(NOTEBOOK.read_text())
+    source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert 'ENCODER_DRIVE = Path("/content/drive/MyDrive/checkpoints/IN1K-vit.h.14-300e.encoder-only.pth.tar")' in source
+    assert 'IN1K-vit.h.14-300e.pth.tar' not in source
