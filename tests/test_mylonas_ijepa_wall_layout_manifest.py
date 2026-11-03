@@ -51,6 +51,31 @@ def test_prepare_manifest_balances_disjoint_layouts_and_policies():
             assert policies == {"wide": 5, "door": 5}
 
 
+def test_matched_manifests_use_separate_training_layouts_and_wide_policy():
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest, validate_manifest
+
+    fixed = prepare_manifest(
+        train_episodes=18, val_episodes=4, test_episodes=8,
+        train_layout_mode="fixed", collection_profile="wide_only",
+    )
+    multi = prepare_manifest(
+        train_episodes=18, val_episodes=4, test_episodes=8,
+        train_layout_mode="multi", collection_profile="wide_only",
+    )
+    assert fixed["train_layouts"] == [[32, 30]]
+    assert len(multi["train_layouts"]) == 9
+    assert fixed["max_training_action_length"] == multi["max_training_action_length"] == 3.5
+    assert all(e["collection_policy"] == "wide" for m in (fixed, multi) for e in m["episodes"])
+    for split in ("val", "test"):
+        assert [e for e in fixed["episodes"] if e["split"] == split] == [
+            e for e in multi["episodes"] if e["split"] == split
+        ]
+    assert [e["seed"] for e in fixed["episodes"]] == [e["seed"] for e in multi["episodes"]]
+    fixed["episodes"][0]["collection_policy"] = "door"
+    with pytest.raises(ValueError, match="wide_only"):
+        validate_manifest(fixed)
+
+
 @pytest.mark.parametrize("mutation", [
     lambda m: m["episodes"][1].update(episode_id=0),
     lambda m: m["episodes"][1].update(episode_id=3),

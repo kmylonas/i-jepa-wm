@@ -102,3 +102,28 @@ def test_audit_reports_coverage_by_layout_and_rejects_metadata_mismatch(tmp_path
     bad["episodes"][0]["wall_layout"] = [24, 18]
     with pytest.raises(ValueError):
         audit_dataset(tmp_path, bad)
+
+
+def test_audit_exports_action_hashes_for_sequential_matched_runs(tmp_path):
+    from src.mylonas_ijepa_wm.audit_wall_dataset import audit_dataset, compare_action_hashes
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
+
+    manifests = [prepare_manifest(
+        train_episodes=9, val_episodes=2, test_episodes=4,
+        train_layout_mode=mode, collection_profile="wide_only",
+    ) for mode in ("fixed", "multi")]
+    audits = []
+    for model, manifest in enumerate(manifests):
+        raw = tmp_path / str(model)
+        raw.mkdir()
+        for entry in manifest["episodes"]:
+            _write_episode(raw / f"episode_{entry['episode_id']:04d}.pt", entry, manifest_digest(manifest))
+            episode = torch.load(raw / f"episode_{entry['episode_id']:04d}.pt", weights_only=True)
+            episode["actions"][:] = torch.tensor([1.0, 0.0])
+            torch.save(episode, raw / f"episode_{entry['episode_id']:04d}.pt")
+        audits.append(audit_dataset(raw, manifest))
+    assert len(audits[0]["action_hashes"]) == 15
+    assert compare_action_hashes(audits[0], audits[1])["matching"] == 15
+    audits[1]["action_hashes"]["0"] = "other"
+    with pytest.raises(ValueError, match="action"):
+        compare_action_hashes(audits[0], audits[1])

@@ -1,6 +1,7 @@
 """Audit DotWall action support, collisions, and doorway crossings before embedding."""
 
 import argparse
+from hashlib import sha256
 import json
 from pathlib import Path
 
@@ -76,6 +77,8 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
         for split in ("train", "val", "test")
         for layout in manifest[f"{split}_layouts"]
     }
+    action_hashes = {}
+    action_range_violations = []
     for entry in manifest["episodes"]:
         episode_id = entry["episode_id"]
         episode = torch.load(
@@ -92,12 +95,19 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
         states = np.asarray(episode["states"], dtype=np.float64)
         if actions.shape != (manifest["steps_per_episode"], 2) or states.shape != (len(actions) + 1, 2):
             raise ValueError(f"Raw episode {episode_id} has invalid action/state shapes")
+        action_hashes[str(entry["seed"])] = sha256(np.asarray(
+            episode["actions"], dtype=np.float32,
+        ).tobytes()).hexdigest()
         key = ",".join(map(str, entry["wall_layout"]))
         counts = layouts[key]
         policy = entry["collection_policy"]
         policy_counts = counts["by_policy"].setdefault(policy, _empty_counts())
         counts["policies"][policy] = counts["policies"].get(policy, 0) + 1
         lengths = np.linalg.norm(actions, axis=1)
+        if manifest.get("collection_profile") == "wide_only" and (
+            np.any(lengths < 0.2 - 1e-5) or np.any(lengths > 3.5 + 1e-5)
+        ):
+            action_range_violations.append(episode_id)
         for bucket in (counts, policy_counts):
             bucket["episodes"] += 1
             bucket["actions"] += len(actions)
@@ -138,11 +148,24 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
             and min(left_to_right, right_to_left) >= thresholds["each_direction"]
             and counts["by_policy"].get("wide", {}).get("length_gt_3_0", 0) > 0
         )
+    if action_range_violations:
+        raise ValueError(f"Wide action lengths outside [0.2, 3.5] in episodes {action_range_violations[:5]}")
     return dict(
         manifest_sha256=digest, episode_counts=manifest["episode_counts"],
-        layouts=layouts, coverage_thresholds=thresholds,
+        layouts=layouts, action_hashes=action_hashes, coverage_thresholds=thresholds,
         coverage_by_training_layout=coverage, coverage_pass=all(coverage.values()),
     )
+
+
+def compare_action_hashes(first: dict, second: dict) -> dict:
+    """Compare sequential datasets without retaining the first raw episodes."""
+    left, right = first["action_hashes"], second["action_hashes"]
+    if set(left) != set(right):
+        raise ValueError("Paired action seed sets differ")
+    mismatches = [seed for seed in left if left[seed] != right[seed]]
+    if mismatches:
+        raise ValueError(f"Paired action sequences differ for seeds {mismatches[:5]}")
+    return {"matching": len(left), "seeds": sorted(map(int, left))}
 
 
 def main(argv=None):

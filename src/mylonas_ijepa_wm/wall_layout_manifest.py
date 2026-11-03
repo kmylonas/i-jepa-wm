@@ -55,6 +55,9 @@ def validate_manifest(manifest: dict) -> dict:
     counts = {split: 0 for split in SPLITS}
     assigned_layouts = {split: set() for split in SPLITS}
     seeds = set()
+    profile = manifest.get("collection_profile")
+    if profile not in (None, "wide_only"):
+        raise ValueError("Unsupported collection_profile")
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or entry.get("episode_id") != index:
             raise ValueError(f"Manifest episode IDs must be contiguous from zero (index {index})")
@@ -69,6 +72,8 @@ def validate_manifest(manifest: dict) -> dict:
         seeds.add(seed)
         if entry.get("collection_policy") not in {"wide", "door"}:
             raise ValueError(f"Episode {index} has invalid collection policy")
+        if profile == "wide_only" and entry["collection_policy"] != "wide":
+            raise ValueError("wide_only manifest cannot contain another collection policy")
         counts[split] += 1
         assigned_layouts[split].add(tuple(entry["wall_layout"]))
     if any(value == 0 for value in counts.values()):
@@ -104,9 +109,15 @@ def validate_checkpoint_manifest(metadata: dict, manifest: dict) -> None:
 def prepare_manifest(
     base_seed: int = 0, train_episodes: int = 2000,
     val_episodes: int = 200, test_episodes: int = 400,
+    train_layout_mode: str = "multi", collection_profile: str = "alternating",
 ) -> dict:
     counts = dict(train=train_episodes, val=val_episodes, test=test_episodes)
-    layouts_by_split = dict(train=TRAIN_LAYOUTS, val=VAL_LAYOUTS, test=TEST_LAYOUTS)
+    if train_layout_mode not in {"fixed", "multi"}:
+        raise ValueError("train_layout_mode must be fixed or multi")
+    if collection_profile not in {"alternating", "wide_only"}:
+        raise ValueError("collection_profile must be alternating or wide_only")
+    train_layouts = [[32, 30]] if train_layout_mode == "fixed" else TRAIN_LAYOUTS
+    layouts_by_split = dict(train=train_layouts, val=VAL_LAYOUTS, test=TEST_LAYOUTS)
     if type(base_seed) is not int or base_seed < 0:
         raise ValueError("base_seed must be a nonnegative integer")
     for split in SPLITS:
@@ -124,11 +135,11 @@ def prepare_manifest(
                 seed=base_seed + episode_id,
                 split=split,
                 wall_layout=list(layouts[layout_index]),
-                collection_policy="wide" if visit % 2 == 0 else "door",
+                collection_policy=("wide" if collection_profile == "wide_only" or visit % 2 == 0 else "door"),
             ))
     manifest = dict(
         schema_version=1,
-        train_layouts=[list(layout) for layout in TRAIN_LAYOUTS],
+        train_layouts=[list(layout) for layout in train_layouts],
         val_layouts=[list(layout) for layout in VAL_LAYOUTS],
         test_layouts=[list(layout) for layout in TEST_LAYOUTS],
         episode_counts=counts,
@@ -136,6 +147,8 @@ def prepare_manifest(
         max_training_action_length=3.5,
         episodes=episodes,
     )
+    if collection_profile == "wide_only":
+        manifest["collection_profile"] = "wide_only"
     return validate_manifest(manifest)
 
 
@@ -151,9 +164,12 @@ def main(argv=None):
     parser.add_argument("--train-episodes", type=int, default=2000)
     parser.add_argument("--val-episodes", type=int, default=200)
     parser.add_argument("--test-episodes", type=int, default=400)
+    parser.add_argument("--train-layout-mode", choices=["fixed", "multi"], default="multi")
+    parser.add_argument("--collection-profile", choices=["alternating", "wide_only"], default="alternating")
     args = parser.parse_args(argv)
     manifest = prepare_manifest(
         args.base_seed, args.train_episodes, args.val_episodes, args.test_episodes,
+        args.train_layout_mode, args.collection_profile,
     )
     root = args.dino_wm_root.expanduser().resolve()
     if not (root / "env/wall/envs/wall.py").is_file():
@@ -165,7 +181,7 @@ def main(argv=None):
         raise FileExistsError("Experiment manifest or config already exists")
     config = EnvironmentConfig(
         env="wall",
-        wall_layouts=[*TRAIN_LAYOUTS, *VAL_LAYOUTS, *TEST_LAYOUTS],
+        wall_layouts=[*manifest["train_layouts"], *VAL_LAYOUTS, *TEST_LAYOUTS],
         dino_wm_root=str(root),
     )
     config_path.write_text(json.dumps({
