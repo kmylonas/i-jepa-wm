@@ -104,9 +104,10 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
         policy_counts = counts["by_policy"].setdefault(policy, _empty_counts())
         counts["policies"][policy] = counts["policies"].get(policy, 0) + 1
         lengths = np.linalg.norm(actions, axis=1)
-        if manifest.get("collection_profile") == "wide_only" and (
-            np.any(lengths < 0.2 - 1e-5) or np.any(lengths > 3.5 + 1e-5)
-        ):
+        profile = manifest.get("collection_profile")
+        if (profile in {"wide_only", "matched_alternating"}
+                and ((policy == "wide" and np.any(lengths < 0.2 - 1e-5))
+                     or np.any(lengths > 3.5 + 1e-5))):
             action_range_violations.append(episode_id)
         for bucket in (counts, policy_counts):
             bucket["episodes"] += 1
@@ -149,7 +150,7 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
             and counts["by_policy"].get("wide", {}).get("length_gt_3_0", 0) > 0
         )
     if action_range_violations:
-        raise ValueError(f"Wide action lengths outside [0.2, 3.5] in episodes {action_range_violations[:5]}")
+        raise ValueError(f"Action lengths outside policy bounds in episodes {action_range_violations[:5]}")
     return dict(
         manifest_sha256=digest, episode_counts=manifest["episode_counts"],
         layouts=layouts, action_hashes=action_hashes, coverage_thresholds=thresholds,
@@ -166,6 +167,42 @@ def compare_action_hashes(first: dict, second: dict) -> dict:
     if mismatches:
         raise ValueError(f"Paired action sequences differ for seeds {mismatches[:5]}")
     return {"matching": len(left), "seeds": sorted(map(int, left))}
+
+
+def compare_matched_action_hashes(
+    first: dict, second: dict, first_manifest: dict, second_manifest: dict,
+    shared_seeds=None,
+) -> dict:
+    """Check paired wide actions and held-out actions; train door actions depend on layout."""
+    first_manifest = validate_manifest(first_manifest)
+    second_manifest = validate_manifest(second_manifest)
+    first_entries = {entry["seed"]: entry for entry in first_manifest["episodes"]}
+    second_entries = {entry["seed"]: entry for entry in second_manifest["episodes"]}
+    if shared_seeds is None:
+        if first_entries.keys() != second_entries.keys():
+            raise ValueError("Paired action seed sets differ")
+        seeds = first_entries.keys()
+    else:
+        seeds = set(shared_seeds)
+        if not seeds <= first_entries.keys() or not seeds <= second_entries.keys():
+            raise ValueError("Requested paired action seeds are missing")
+    matching = 0
+    layout_dependent_train_door = 0
+    for seed in seeds:
+        left, right = first_entries[seed], second_entries[seed]
+        if left["split"] != right["split"] or left["collection_policy"] != right["collection_policy"]:
+            raise ValueError(f"Paired action policy differs for seed {seed}")
+        if left["split"] != "train" and left["wall_layout"] != right["wall_layout"]:
+            raise ValueError(f"Held-out layout differs for seed {seed}")
+        if left["split"] == "train" and left["collection_policy"] == "door":
+            layout_dependent_train_door += 1
+            continue
+        left_hash = first["action_hashes"].get(str(seed))
+        right_hash = second["action_hashes"].get(str(seed))
+        if not left_hash or not right_hash or left_hash != right_hash:
+            raise ValueError(f"Paired action sequences differ for seed {seed}")
+        matching += 1
+    return {"matching": matching, "layout_dependent_train_door": layout_dependent_train_door}
 
 
 def main(argv=None):

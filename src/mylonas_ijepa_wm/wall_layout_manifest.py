@@ -56,8 +56,9 @@ def validate_manifest(manifest: dict) -> dict:
     assigned_layouts = {split: set() for split in SPLITS}
     seeds = set()
     profile = manifest.get("collection_profile")
-    if profile not in (None, "wide_only"):
+    if profile not in (None, "wide_only", "matched_alternating"):
         raise ValueError("Unsupported collection_profile")
+    visits_by_split_layout = {split: {} for split in SPLITS}
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or entry.get("episode_id") != index:
             raise ValueError(f"Manifest episode IDs must be contiguous from zero (index {index})")
@@ -74,6 +75,14 @@ def validate_manifest(manifest: dict) -> dict:
             raise ValueError(f"Episode {index} has invalid collection policy")
         if profile == "wide_only" and entry["collection_policy"] != "wide":
             raise ValueError("wide_only manifest cannot contain another collection policy")
+        if profile == "matched_alternating":
+            layout_key = tuple(entry["wall_layout"])
+            visit = visits_by_split_layout[split].get(layout_key, 0)
+            phase = index if split == "train" else visit
+            expected_policy = "wide" if phase % 2 == 0 else "door"
+            if entry["collection_policy"] != expected_policy:
+                raise ValueError("matched_alternating policy assignment differs")
+            visits_by_split_layout[split][layout_key] = visit + 1
         counts[split] += 1
         assigned_layouts[split].add(tuple(entry["wall_layout"]))
     if any(value == 0 for value in counts.values()):
@@ -114,8 +123,8 @@ def prepare_manifest(
     counts = dict(train=train_episodes, val=val_episodes, test=test_episodes)
     if train_layout_mode not in {"fixed", "multi"}:
         raise ValueError("train_layout_mode must be fixed or multi")
-    if collection_profile not in {"alternating", "wide_only"}:
-        raise ValueError("collection_profile must be alternating or wide_only")
+    if collection_profile not in {"alternating", "wide_only", "matched_alternating"}:
+        raise ValueError("collection_profile must be alternating, wide_only, or matched_alternating")
     train_layouts = [[32, 30]] if train_layout_mode == "fixed" else TRAIN_LAYOUTS
     layouts_by_split = dict(train=train_layouts, val=VAL_LAYOUTS, test=TEST_LAYOUTS)
     if type(base_seed) is not int or base_seed < 0:
@@ -130,12 +139,18 @@ def prepare_manifest(
             episode_id = len(episodes)
             layout_index = local_index % len(layouts)
             visit = local_index // len(layouts)
+            if collection_profile == "wide_only":
+                policy = "wide"
+            elif collection_profile == "matched_alternating" and split == "train":
+                policy = "wide" if episode_id % 2 == 0 else "door"
+            else:
+                policy = "wide" if visit % 2 == 0 else "door"
             episodes.append(dict(
                 episode_id=episode_id,
                 seed=base_seed + episode_id,
                 split=split,
                 wall_layout=list(layouts[layout_index]),
-                collection_policy=("wide" if collection_profile == "wide_only" or visit % 2 == 0 else "door"),
+                collection_policy=policy,
             ))
     manifest = dict(
         schema_version=1,
@@ -147,8 +162,8 @@ def prepare_manifest(
         max_training_action_length=3.5,
         episodes=episodes,
     )
-    if collection_profile == "wide_only":
-        manifest["collection_profile"] = "wide_only"
+    if collection_profile != "alternating":
+        manifest["collection_profile"] = collection_profile
     return validate_manifest(manifest)
 
 
@@ -165,7 +180,7 @@ def main(argv=None):
     parser.add_argument("--val-episodes", type=int, default=200)
     parser.add_argument("--test-episodes", type=int, default=400)
     parser.add_argument("--train-layout-mode", choices=["fixed", "multi"], default="multi")
-    parser.add_argument("--collection-profile", choices=["alternating", "wide_only"], default="alternating")
+    parser.add_argument("--collection-profile", choices=["alternating", "wide_only", "matched_alternating"], default="alternating")
     args = parser.parse_args(argv)
     manifest = prepare_manifest(
         args.base_seed, args.train_episodes, args.val_episodes, args.test_episodes,

@@ -10,11 +10,11 @@ def test_uploadable_notebook_contains_sequential_runtime_only_data_flow():
     assert notebook["nbformat"] == 4
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
     assert "from google.colab import drive" in source
-    assert 'LOCAL_ROOT = Path("/content/wall_matched_fixed_multi_v1")' in source
-    assert 'DRIVE_ROOT = Path("/content/drive/MyDrive/datasets/wall_matched_fixed_multi_v1")' in source
+    assert 'LOCAL_ROOT = Path("/content/wall_matched_fixed_multi_v2")' in source
+    assert 'DRIVE_ROOT = Path("/content/drive/MyDrive/datasets/wall_matched_fixed_multi_v2")' in source
     assert 'MODEL_DIRS = {mode: DRIVE_ROOT / mode for mode in ("fixed", "multi")}' in source
-    assert 'prepare_manifest(train_layout_mode=mode, collection_profile="wide_only")' in source
-    assert 'collection_profile="wide_only"' in source
+    assert 'prepare_manifest(train_layout_mode=mode, collection_profile="matched_alternating")' in source
+    assert 'collection_profile="matched_alternating"' in source
     assert '"--max-action-length", "3.5"' in source
     assert '"--matched"' in source and '"--fixed-manifest"' in source
     assert source.index('run_model("fixed")') < source.index('run_model("multi")')
@@ -24,7 +24,7 @@ def test_uploadable_notebook_contains_sequential_runtime_only_data_flow():
     assert '"--embedding-frame-stride", "1"' in source
     assert 'pilot_model("fixed")' in source
     assert 'pilot_model("multi")' in source
-    assert 'assert audit["coverage_pass"]' not in source
+    assert 'assert audit["coverage_pass"]' in source
 
 
 def test_notebook_embeds_pinned_source_patch():
@@ -49,5 +49,6 @@ def test_notebook_checks_current_identity_and_pilot_actions():
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
     assert 'assert json.loads(identity_path.read_text()) == expected_identity(mode)' in source
     assert 'assert complete["identity"] == expected_identity(mode)' in source
-    assert 'compare_action_hashes(pilot_train_audits["fixed"], pilot_train_audits["multi"])' in source
+    assert 'compare_matched_action_hashes(' in source
+    assert 'shared_seeds=range(100000, 100010)' in source
     assert 'pilot_coverage.json' in source

@@ -127,3 +127,28 @@ def test_audit_exports_action_hashes_for_sequential_matched_runs(tmp_path):
     audits[1]["action_hashes"]["0"] = "other"
     with pytest.raises(ValueError, match="action"):
         compare_action_hashes(audits[0], audits[1])
+
+
+def test_matched_alternating_hashes_compare_wide_and_heldout_but_allow_train_door_difference():
+    from src.mylonas_ijepa_wm.audit_wall_dataset import compare_matched_action_hashes
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
+
+    fixed, multi = [prepare_manifest(
+        train_episodes=18, val_episodes=4, test_episodes=8,
+        train_layout_mode=mode, collection_profile="matched_alternating",
+    ) for mode in ("fixed", "multi")]
+    fixed_hashes = {str(e["seed"]): f"same-{e['seed']}" for e in fixed["episodes"]}
+    multi_hashes = dict(fixed_hashes)
+    door_seed = next(e["seed"] for e in fixed["episodes"]
+                     if e["split"] == "train" and e["collection_policy"] == "door")
+    multi_hashes[str(door_seed)] = "layout-dependent"
+    result = compare_matched_action_hashes(
+        {"action_hashes": fixed_hashes}, {"action_hashes": multi_hashes}, fixed, multi)
+    assert result["layout_dependent_train_door"] == 9
+    assert result["matching"] == len(fixed["episodes"]) - 9
+    wide_seed = next(e["seed"] for e in fixed["episodes"]
+                     if e["split"] == "train" and e["collection_policy"] == "wide")
+    multi_hashes[str(wide_seed)] = "wrong"
+    with pytest.raises(ValueError, match="action"):
+        compare_matched_action_hashes(
+            {"action_hashes": fixed_hashes}, {"action_hashes": multi_hashes}, fixed, multi)

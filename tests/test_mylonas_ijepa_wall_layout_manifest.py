@@ -76,6 +76,31 @@ def test_matched_manifests_use_separate_training_layouts_and_wide_policy():
         validate_manifest(fixed)
 
 
+def test_matched_alternating_manifests_pair_policy_by_seed_and_cover_each_layout():
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest, validate_manifest
+
+    fixed, multi = [prepare_manifest(
+        train_episodes=90, val_episodes=20, test_episodes=40,
+        train_layout_mode=mode, collection_profile="matched_alternating",
+    ) for mode in ("fixed", "multi")]
+    assert fixed["train_layouts"] == [[32, 30]]
+    assert len(multi["train_layouts"]) == 9
+    assert [e["collection_policy"] for e in fixed["episodes"]] == [
+        e["collection_policy"] for e in multi["episodes"]]
+    for manifest in (fixed, multi):
+        for layout in manifest["train_layouts"]:
+            entries = [e for e in manifest["episodes"] if e["split"] == "train"
+                       and e["wall_layout"] == layout]
+            assert set(e["collection_policy"] for e in entries) == {"wide", "door"}
+            assert all(a["collection_policy"] != b["collection_policy"]
+                       for a, b in zip(entries, entries[1:]))
+    assert [e for e in fixed["episodes"] if e["split"] != "train"] == [
+        e for e in multi["episodes"] if e["split"] != "train"]
+    fixed["episodes"][0]["collection_policy"] = "door"
+    with pytest.raises(ValueError, match="matched_alternating"):
+        validate_manifest(fixed)
+
+
 @pytest.mark.parametrize("mutation", [
     lambda m: m["episodes"][1].update(episode_id=0),
     lambda m: m["episodes"][1].update(episode_id=3),

@@ -4,7 +4,7 @@
 
 **Goal:** Deliver an uploadable Colab notebook that trains and evaluates new fixed-layout and multi-layout Wall world models with layout diversity as the sole planned training-data difference.
 
-**Architecture:** Extend the existing manifest and audit to describe separate fixed and multi datasets using the correlated wide policy with action lengths 0.2–3.5. Reuse collection, dense embedding, manifest-based training, rollout evaluation, and planning. Update comparison utilities to accept two manifest-backed checkpoints; orchestrate sequential runtime-local datasets in one Colab notebook while saving metadata, checkpoints, and results to Drive.
+**Architecture:** Extend the existing manifest and audit to describe separate fixed and multi datasets alternating correlated wide actions (lengths 0.2–3.5) with doorway-directed actions. Pair policy assignments by seed. Reuse collection, dense embedding, manifest-based training, rollout evaluation, and planning. Update comparison utilities to accept two manifest-backed checkpoints; orchestrate sequential runtime-local datasets in one Colab notebook while saving metadata, checkpoints, and results to Drive.
 
 **Tech Stack:** Python, PyTorch, NumPy, pinned DINO-WM DotWall, Jupyter/Colab, pytest, JSON.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Training layouts are fixed `[[32, 30]]` versus multi `[24, 32, 40] × [18, 30, 42]`; validation `[[28, 24], [36, 36]]`; test `[[26, 22], [26, 38], [38, 22], [38, 38]]`.
-- Each model gets a separate dataset of 2,000 training, 200 validation, and 400 test episodes; 50 primitive actions per episode; only the existing `wide` correlated policy with uniform lengths `[0.2, 3.5]`.
+- Each model gets a separate dataset of 2,000 training, 200 validation, and 400 test episodes; 50 primitive actions per episode; alternate the existing `wide` correlated policy with uniform lengths `[0.2, 3.5]` and the existing doorway-directed `door` policy.
 - Both use the same frozen I-JEPA checkpoint, DotWall commit, model configuration, training settings, and seed. Embedding stride is 1; history and rollout training steps are 1.
 - Primary planning uses position cost, 50 seeds per test layout, identical CEM settings, and Euclidean action cap 3.5. The 0.2 training lower bound is not a planning lower bound.
 - Raw frames, episodes, latent caches, and trajectory sidecars stay under `/content`; Drive holds only manifests/configs, checkpoints/logs, and results.
@@ -22,8 +22,8 @@
 ## Review Focus
 
 - Fixed manifest with only the default `[32, 30]` training layout: accept it, while still rejecting train/validation/test coordinate leakage.
-- Mixed policy or action maximum in a new manifest: reject before collecting or training.
-- Paired seeds whose realized training actions diverge unexpectedly: expose the mismatch in the pilot audit.
+- Wrong policy assignment or action maximum in a new manifest: reject before collecting or training.
+- Paired seeds whose wide training or held-out actions diverge unexpectedly: expose the mismatch in the pilot or full audit. Doorway-directed training actions may differ by layout.
 - Insufficient runtime disk or interrupted embedding batch: fail before filling disk, then resume only verified cache pairs.
 - Fixed checkpoint with a manifest in visual probes/planning: validate against its own manifest rather than treating it as the historical checkpoint.
 
@@ -38,13 +38,13 @@
 - Test: `tests/test_mylonas_ijepa_wall_coverage.py`
 
 **Interfaces:**
-- Extend `prepare_manifest(...)` with explicit training-layout mode and collection-policy arguments while retaining existing defaults. Its matched modes produce fixed and multi manifests with identical validation/test assignments and paired episode seeds; every entry uses `wide`, and `max_training_action_length` is 3.5.
+- Extend `prepare_manifest(...)` with explicit training-layout mode and collection-policy arguments while retaining existing defaults. Its matched modes produce fixed and multi manifests with identical validation/test assignments and paired episode seeds; wide and door episodes alternate by seed, and `max_training_action_length` is 3.5.
 - `validate_manifest(...)` accepts this matched profile, rejects inconsistent policy/action maxima, and continues to accept the existing wide/door profile.
-- The audit checks action norms against `[0.2, 3.5]`, reports per-layout contacts and doorway crossings, and records the old mixed-policy coverage threshold as diagnostic for the matched profile. It exports compact per-episode action hashes keyed by seed; the second run compares those with the first run's saved audit, without retaining the first raw directory.
+- The audit checks wide action norms against `[0.2, 3.5]`, reports per-layout contacts and doorway crossings, and gates the full dataset on the existing mixed-policy coverage threshold. It exports compact per-episode action hashes keyed by seed; the second run compares wide training and all held-out hashes with the first run's saved audit, without retaining the first raw directory.
 
 - [ ] Add failing tests for both exact manifest layouts/counts, common validation/test assignments, seed pairing, policy/max mismatches, and preservation of the old profile.
 - [ ] Run focused tests and confirm the new cases fail for the expected reasons.
-- [ ] Implement the manifest arguments and profile-aware validation; keep collector and trainer entry points unchanged because they already consume explicit manifests and `wide` entries.
+- [ ] Implement the manifest arguments and profile-aware validation; keep collector and trainer entry points unchanged because they already consume explicit `wide` and `door` manifest entries.
 - [ ] Add failing audit tests for action-range violations, contact/crossing counts, and paired action divergence; implement the matched audit path.
 - [ ] Run the two focused test modules and existing manifest/collection tests; require zero failures. Commit this task.
 
