@@ -30,5 +30,5 @@ Isolate the effect of training-layout diversity on geometry-sensitive world-mode
 ## Acceptance and limits
 
 - Both runs must use the specified policy and action range, have equal training episode counts, pass split/identity checks, and produce checkpoints and evaluation files with matching settings.
-- If a pretraining pilot shows poor wall-contact or doorway-crossing coverage, stop before full embedding and review the episode budget. Do not silently introduce a different policy. Record any budget increase equally for both models before the full runs.
+- Report wall-contact and doorway-crossing coverage from the pilot and full datasets. The old mixed-policy doorway threshold is diagnostic for this correlated-only experiment; it does not stop training. Do not silently introduce a different policy or change the predeclared 2,000-episode budget. Treat sparse doorway data as a limitation of the matched comparison.
 - The experiment isolates layout diversity under this collector and simulator. It does not establish vision-only planning because the world model receives true ball position at each replanning update.

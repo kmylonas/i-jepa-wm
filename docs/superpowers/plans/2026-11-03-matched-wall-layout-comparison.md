@@ -40,7 +40,7 @@
 **Interfaces:**
 - Extend `prepare_manifest(...)` with explicit training-layout mode and collection-policy arguments while retaining existing defaults. Its matched modes produce fixed and multi manifests with identical validation/test assignments and paired episode seeds; every entry uses `wide`, and `max_training_action_length` is 3.5.
 - `validate_manifest(...)` accepts this matched profile, rejects inconsistent policy/action maxima, and continues to accept the existing wide/door profile.
-- The audit checks action norms against `[0.2, 3.5]`, reports per-layout contacts and doorway crossings, and applies the existing `wide > 3.0` gate to the matched profile. It exports compact per-episode action hashes keyed by seed; the second run compares those with the first run's saved audit, without retaining the first raw directory.
+- The audit checks action norms against `[0.2, 3.5]`, reports per-layout contacts and doorway crossings, and records the old mixed-policy coverage threshold as diagnostic for the matched profile. It exports compact per-episode action hashes keyed by seed; the second run compares those with the first run's saved audit, without retaining the first raw directory.
 
 - [ ] Add failing tests for both exact manifest layouts/counts, common validation/test assignments, seed pairing, policy/max mismatches, and preservation of the old profile.
 - [ ] Run focused tests and confirm the new cases fail for the expected reasons.

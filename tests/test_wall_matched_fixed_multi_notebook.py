@@ -24,6 +24,7 @@ def test_uploadable_notebook_contains_sequential_runtime_only_data_flow():
     assert '"--embedding-frame-stride", "1"' in source
     assert 'pilot_model("fixed")' in source
     assert 'pilot_model("multi")' in source
+    assert 'assert audit["coverage_pass"]' not in source
 
 
 def test_notebook_embeds_pinned_source_patch():
