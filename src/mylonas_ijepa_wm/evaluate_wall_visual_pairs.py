@@ -247,15 +247,22 @@ def evaluate_pairs(
         training_layouts = [list(layout) for layout in manifest["train_layouts"]]
     else:
         fixed_config = metadata.get("environment_config") or {}
-        if (fixed_config.get("wall_layouts") is not None
-                or metadata.get("camera") != "topdown"
+        if (metadata.get("camera") != "topdown"
                 or tuple(metadata.get("proprio_fields", ())) != ("x", "y")
                 or metadata.get("actions_per_model_step") != 5):
             raise ValueError("Fixed checkpoint must be a single-layout top-down Wall model")
-        training_layout = [fixed_config.get("wall_location"), fixed_config.get("door_location")]
-        if not all(type(coordinate) is int for coordinate in training_layout):
-            raise ValueError("Fixed checkpoint lacks its training wall and door coordinates")
-        training_layouts = [training_layout]
+        if manifest is not None:
+            validate_checkpoint_manifest(metadata, manifest)
+            training_layouts = [list(layout) for layout in manifest["train_layouts"]]
+            if training_layouts != [[32, 30]] or [32, 30] not in fixed_config.get("wall_layouts", []):
+                raise ValueError("Fixed checkpoint manifest/config must use the default training layout")
+        else:
+            if fixed_config.get("wall_layouts") is not None:
+                raise ValueError("Historical fixed checkpoint must have one implicit layout")
+            training_layout = [fixed_config.get("wall_location"), fixed_config.get("door_location")]
+            if not all(type(coordinate) is int for coordinate in training_layout):
+                raise ValueError("Fixed checkpoint lacks its training wall and door coordinates")
+            training_layouts = [training_layout]
     if manifest is not None:
         validate_manifest(manifest)
         if probe_set == "heldout":

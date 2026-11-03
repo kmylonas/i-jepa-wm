@@ -191,6 +191,43 @@ def test_fixed_checkpoint_uses_its_own_training_layout_without_multi_manifest(tm
     assert len(extreme["pairs"]) == 8
 
 
+def test_new_fixed_checkpoint_validates_its_own_manifest(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
+    from src.mylonas_ijepa_wm.wall_layout_manifest import manifest_digest
+
+    manifest = prepare_manifest(
+        train_episodes=9, val_episodes=2, test_episodes=4,
+        train_layout_mode="fixed", collection_profile="wide_only",
+    )
+    metadata = {
+        "environment": "wall", "camera": "topdown", "actions_per_model_step": 5,
+        "proprio_fields": ("x", "y"),
+        "environment_config": {"wall_layouts": [[32, 30]]},
+        "experiment_manifest_sha256": manifest_digest(manifest),
+        "layout_splits": {s: manifest[f"{s}_layouts"] for s in ("train", "val", "test")},
+        **{f"{s}_ids": [e["episode_id"] for e in manifest["episodes"] if e["split"] == s]
+           for s in ("train", "val", "test")},
+    }
+    config = tmp_path / "env.json"
+    config.write_text('{"env": "wall"}')
+    monkeypatch.setattr(visual_pairs.wm_proprio, "load_model_and_metadata",
+                        lambda *args: (type("Model", (), {"num_hist": 1})(), metadata, 1))
+    monkeypatch.setattr(visual_pairs.visual, "load_frozen_ijepa_encoder", lambda *args: object())
+    monkeypatch.setattr(visual_pairs, "create_adapter", lambda *args, **kwargs: type(
+        "Adapter", (), {"close": lambda self: None},
+    )())
+    monkeypatch.setattr(visual_pairs, "evaluate_pair", lambda *args: {
+        "name": args[4]["name"], "predicted_contrast": True, "both_correct": True,
+        "cases": [{"position_error": 0.0, "predicted_crossed": True, "actual_crossed": True}],
+    })
+    monkeypatch.setattr(visual_pairs, "save_pair_figure", lambda record, path: path)
+    result = visual_pairs.evaluate_pairs(
+        tmp_path / "checkpoint.pt", tmp_path / "encoder.pt", manifest,
+        tmp_path / "result.json", config, "cpu", "fp32", checkpoint_role="fixed",
+    )
+    assert result["training_layouts"] == [[32, 30]]
+
+
 def test_multi_checkpoint_extreme_probes_preserve_manifest_validation(tmp_path, monkeypatch):
     from src.mylonas_ijepa_wm import evaluate_wall_visual_pairs as visual_pairs
     from src.mylonas_ijepa_wm.wall_layout_manifest import manifest_digest

@@ -43,6 +43,48 @@ def test_matrix_builds_matched_modes_with_requested_action_caps(tmp_path):
                 assert args[args.index("--max-action-length") + 1] == expected
 
 
+def test_new_matched_mode_uses_only_in_support_cap_and_50_seeds(tmp_path):
+    from src.mylonas_ijepa_wm.run_wall_planning_matrix import build_invocations
+
+    manifest = prepare_manifest(
+        train_episodes=18, val_episodes=4, test_episodes=8,
+        collection_profile="wide_only",
+    )
+    configs = {tuple(layout): tmp_path / f"{layout[0]}_{layout[1]}.json"
+               for layout in manifest["test_layouts"]}
+    runs = build_invocations(
+        manifest, configs, tmp_path, Path("encoder.pt"),
+        Path("multi.pt"), Path("fixed.pt"), num_episodes=50,
+        matched=True,
+    )
+    assert len(runs) == 8
+    assert {(r["model"], r["mode"]) for r in runs} == {
+        (model, "cap_train") for model in ("multi", "fixed")
+    }
+    for item in runs:
+        argv = item["argv"]
+        assert argv[argv.index("--max-action-length") + 1] == "3.5"
+        assert argv[argv.index("--num-episodes") + 1] == "50"
+        assert "--video-dir" not in argv
+
+
+def test_paired_summary_clusters_reused_seed_across_layouts():
+    from src.mylonas_ijepa_wm.run_wall_planning_matrix import paired_success_summary
+
+    episodes = []
+    for layout in ([26, 22], [38, 38]):
+        for model, values in (("multi", [True, False]), ("fixed", [False, False])):
+            episodes.append({"model": model, "wall_layout": layout,
+                             "episodes": [{"seed": seed, "success": success}
+                                          for seed, success in zip((100, 101), values)]})
+    summary = paired_success_summary(episodes, bootstrap_samples=100)
+    assert summary["paired_episode_count"] == 4
+    assert summary["seed_clusters"] == 2
+    assert summary["success_difference"] == pytest.approx(0.5)
+    assert summary["discordant_multi_only"] == 2
+    assert summary["discordant_fixed_only"] == 0
+
+
 def test_wilson_interval_and_matrix_summary_use_each_layout_separately():
     from src.mylonas_ijepa_wm.run_wall_planning_matrix import summarize_run, wilson_interval
 
