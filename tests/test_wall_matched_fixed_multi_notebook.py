@@ -19,10 +19,15 @@ def test_uploadable_notebook_contains_sequential_runtime_only_data_flow():
     assert notebook["nbformat"] == 4
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
     assert "from google.colab import drive" in source
-    assert 'LOCAL_ROOT = Path("/content/wall_matched_fixed_multi_v2")' in source
-    assert 'DRIVE_ROOT = Path("/content/drive/MyDrive/datasets/wall_matched_fixed_multi_v2")' in source
+    assert 'LOCAL_ROOT = Path("/content/wall_matched_fixed_multi_v3")' in source
+    assert 'DRIVE_ROOT = Path("/content/drive/MyDrive/datasets/wall_matched_fixed_multi_v3")' in source
     assert 'MODEL_DIRS = {mode: DRIVE_ROOT / mode for mode in ("fixed", "multi")}' in source
-    assert 'prepare_manifest(train_layout_mode=mode, collection_profile="matched_alternating")' in source
+    assert 'prepare_manifest(train_layout_mode=mode, collection_profile="matched_alternating",' in source
+    assert 'validation_layout_mode="training"' in source
+    assert '"--validation-layout-mode", "training"' in source
+    assert 'fixed_manifest["val_layouts"] == fixed_manifest["train_layouts"]' in source
+    assert 'multi_manifest["val_layouts"] == multi_manifest["train_layouts"]' in source
+    assert 'if e["split"] == "test"' in source
     assert 'collection_profile="matched_alternating"' in source
     assert '"--max-action-length", "3.5"' in source
     assert '"--matched"' in source and '"--fixed-manifest"' in source
@@ -39,7 +44,8 @@ def test_uploadable_notebook_contains_sequential_runtime_only_data_flow():
 def test_notebook_checks_out_pushed_source_commit_without_embedded_patch():
     notebook = json.loads(NOTEBOOK.read_text())
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
-    assert 'SOURCE_COMMIT = "82b08453f3ee8f0913da851cfeb98b296c9e90af"' in source
+    assert 'SOURCE_COMMIT = "b493bf89dd67473a94b3cf4681f952e5f6a7318d"' in source
+    assert '["git", "fetch", "origin", "wall-layout-generalization"]' in source
     assert '"git", "checkout", SOURCE_COMMIT' in source
     assert "PATCH_B64" not in source
     assert "PATCH_SHA256" not in source
