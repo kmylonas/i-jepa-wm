@@ -104,6 +104,36 @@ def test_audit_reports_coverage_by_layout_and_rejects_metadata_mismatch(tmp_path
         audit_dataset(tmp_path, bad)
 
 
+def test_training_coverage_ignores_validation_episodes_on_same_layout(tmp_path):
+    from src.mylonas_ijepa_wm.audit_wall_dataset import audit_dataset
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
+
+    manifest = prepare_manifest(train_episodes=1, val_episodes=50, test_episodes=4,
+                                train_layout_mode="fixed", validation_layout_mode="training")
+    digest = manifest_digest(manifest)
+    for entry in manifest["episodes"]:
+        path = tmp_path / f"episode_{entry['episode_id']:04d}.pt"
+        _write_episode(path, entry, digest)
+        if entry["split"] != "val":
+            continue
+        episode = torch.load(path, weights_only=True)
+        local = entry["episode_id"] - 1
+        if local < 30:
+            start, end, action = [28., 20.], [29., 20.], [2., 0.]
+        elif local < 40:
+            start, end, action = [29., 30.], [33., 30.], [2., 0.]
+        else:
+            start, end, action = [35., 30.], [31., 30.], [-2., 0.]
+        episode["states"][0] = torch.tensor(start)
+        episode["states"][1] = torch.tensor(end)
+        episode["actions"][0] = torch.tensor(action)
+        torch.save(episode, path)
+    audit = audit_dataset(tmp_path, manifest)
+    assert audit["layouts"]["32,30"]["solid_contacts"] >= 25
+    assert audit["training_layouts"]["32,30"]["solid_contacts"] == 1
+    assert audit["coverage_by_training_layout"] == {"32,30": False}
+
+
 def test_audit_exports_action_hashes_for_sequential_matched_runs(tmp_path):
     from src.mylonas_ijepa_wm.audit_wall_dataset import audit_dataset, compare_action_hashes
     from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
@@ -152,3 +182,30 @@ def test_matched_alternating_hashes_compare_wide_and_heldout_but_allow_train_doo
     with pytest.raises(ValueError, match="action"):
         compare_matched_action_hashes(
             {"action_hashes": fixed_hashes}, {"action_hashes": multi_hashes}, fixed, multi)
+
+
+def test_matched_hashes_allow_validation_door_actions_to_depend_on_layout():
+    from src.mylonas_ijepa_wm.audit_wall_dataset import compare_matched_action_hashes
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest
+
+    fixed, multi = [prepare_manifest(
+        train_episodes=18, val_episodes=18, test_episodes=8,
+        train_layout_mode=mode, collection_profile="matched_alternating",
+        validation_layout_mode="training",
+    ) for mode in ("fixed", "multi")]
+    first = {str(e["seed"]): f"same-{e['seed']}" for e in fixed["episodes"]}
+    second = dict(first)
+    changed = [e for e in multi["episodes"] if e["split"] == "val"
+               and e["collection_policy"] == "door" and e["wall_layout"] != [32, 30]]
+    for entry in changed:
+        second[str(entry["seed"])] = "layout-dependent"
+    result = compare_matched_action_hashes(
+        {"action_hashes": first}, {"action_hashes": second}, fixed, multi)
+    assert result["layout_dependent_train_door"] == 17
+    assert result["matching"] == len(first) - 17
+    wide_seed = next(e["seed"] for e in multi["episodes"]
+                     if e["split"] == "val" and e["collection_policy"] == "wide")
+    second[str(wide_seed)] = "bad"
+    with pytest.raises(ValueError, match="action"):
+        compare_matched_action_hashes(
+            {"action_hashes": first}, {"action_hashes": second}, fixed, multi)

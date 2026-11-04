@@ -30,6 +30,9 @@ def _validate_layout(layout):
 def validate_manifest(manifest: dict) -> dict:
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
         raise ValueError("Unsupported wall layout manifest schema")
+    validation_layout_mode = manifest.get("validation_layout_mode", "unseen")
+    if validation_layout_mode not in {"unseen", "training"}:
+        raise ValueError("Unsupported validation_layout_mode")
     layouts_by_split = {}
     seen_layouts = set()
     seen_wall_positions = set()
@@ -39,11 +42,19 @@ def validate_manifest(manifest: dict) -> dict:
         if not isinstance(layouts, list) or not layouts:
             raise ValueError(f"{split}_layouts must be nonempty")
         values = [_validate_layout(layout) for layout in layouts]
-        if len(set(values)) != len(values) or seen_layouts.intersection(values):
+        if len(set(values)) != len(values):
+            raise ValueError("Wall layouts must be unique within each split")
+        if split == "val" and validation_layout_mode == "training":
+            if values != [_validate_layout(layout) for layout in manifest["train_layouts"]]:
+                raise ValueError("Validation layouts must equal training layouts")
+        elif seen_layouts.intersection(values):
             raise ValueError("Wall layouts must be unique and disjoint across splits")
         wall_positions = {wall_x for wall_x, _ in values}
         door_positions = {door_y for _, door_y in values}
-        if seen_wall_positions.intersection(wall_positions) or seen_door_positions.intersection(door_positions):
+        if (split != "val" or validation_layout_mode != "training") and (
+            seen_wall_positions.intersection(wall_positions)
+            or seen_door_positions.intersection(door_positions)
+        ):
             raise ValueError("Wall and doorway coordinates must be unseen across splits")
         layouts_by_split[split] = set(values)
         seen_layouts.update(values)
@@ -78,7 +89,8 @@ def validate_manifest(manifest: dict) -> dict:
         if profile == "matched_alternating":
             layout_key = tuple(entry["wall_layout"])
             visit = visits_by_split_layout[split].get(layout_key, 0)
-            phase = index if split == "train" else visit
+            phase = index if (split == "train" or
+                              (split == "val" and validation_layout_mode == "training")) else visit
             expected_policy = "wide" if phase % 2 == 0 else "door"
             if entry["collection_policy"] != expected_policy:
                 raise ValueError("matched_alternating policy assignment differs")
@@ -119,14 +131,18 @@ def prepare_manifest(
     base_seed: int = 0, train_episodes: int = 2000,
     val_episodes: int = 200, test_episodes: int = 400,
     train_layout_mode: str = "multi", collection_profile: str = "alternating",
+    validation_layout_mode: str = "unseen",
 ) -> dict:
     counts = dict(train=train_episodes, val=val_episodes, test=test_episodes)
     if train_layout_mode not in {"fixed", "multi"}:
         raise ValueError("train_layout_mode must be fixed or multi")
     if collection_profile not in {"alternating", "wide_only", "matched_alternating"}:
         raise ValueError("collection_profile must be alternating, wide_only, or matched_alternating")
+    if validation_layout_mode not in {"unseen", "training"}:
+        raise ValueError("validation_layout_mode must be unseen or training")
     train_layouts = [[32, 30]] if train_layout_mode == "fixed" else TRAIN_LAYOUTS
-    layouts_by_split = dict(train=train_layouts, val=VAL_LAYOUTS, test=TEST_LAYOUTS)
+    val_layouts = train_layouts if validation_layout_mode == "training" else VAL_LAYOUTS
+    layouts_by_split = dict(train=train_layouts, val=val_layouts, test=TEST_LAYOUTS)
     if type(base_seed) is not int or base_seed < 0:
         raise ValueError("base_seed must be a nonnegative integer")
     for split in SPLITS:
@@ -141,7 +157,9 @@ def prepare_manifest(
             visit = local_index // len(layouts)
             if collection_profile == "wide_only":
                 policy = "wide"
-            elif collection_profile == "matched_alternating" and split == "train":
+            elif collection_profile == "matched_alternating" and (
+                split == "train" or (split == "val" and validation_layout_mode == "training")
+            ):
                 policy = "wide" if episode_id % 2 == 0 else "door"
             else:
                 policy = "wide" if visit % 2 == 0 else "door"
@@ -155,7 +173,7 @@ def prepare_manifest(
     manifest = dict(
         schema_version=1,
         train_layouts=[list(layout) for layout in train_layouts],
-        val_layouts=[list(layout) for layout in VAL_LAYOUTS],
+        val_layouts=[list(layout) for layout in val_layouts],
         test_layouts=[list(layout) for layout in TEST_LAYOUTS],
         episode_counts=counts,
         steps_per_episode=50,
@@ -164,6 +182,8 @@ def prepare_manifest(
     )
     if collection_profile != "alternating":
         manifest["collection_profile"] = collection_profile
+    if validation_layout_mode != "unseen":
+        manifest["validation_layout_mode"] = validation_layout_mode
     return validate_manifest(manifest)
 
 
@@ -181,10 +201,11 @@ def main(argv=None):
     parser.add_argument("--test-episodes", type=int, default=400)
     parser.add_argument("--train-layout-mode", choices=["fixed", "multi"], default="multi")
     parser.add_argument("--collection-profile", choices=["alternating", "wide_only", "matched_alternating"], default="alternating")
+    parser.add_argument("--validation-layout-mode", choices=["unseen", "training"], default="unseen")
     args = parser.parse_args(argv)
     manifest = prepare_manifest(
         args.base_seed, args.train_episodes, args.val_episodes, args.test_episodes,
-        args.train_layout_mode, args.collection_profile,
+        args.train_layout_mode, args.collection_profile, args.validation_layout_mode,
     )
     root = args.dino_wm_root.expanduser().resolve()
     if not (root / "env/wall/envs/wall.py").is_file():
@@ -196,7 +217,9 @@ def main(argv=None):
         raise FileExistsError("Experiment manifest or config already exists")
     config = EnvironmentConfig(
         env="wall",
-        wall_layouts=[*manifest["train_layouts"], *VAL_LAYOUTS, *TEST_LAYOUTS],
+        wall_layouts=[list(layout) for layout in dict.fromkeys(
+            tuple(layout) for split in SPLITS for layout in manifest[f"{split}_layouts"]
+        )],
         dino_wm_root=str(root),
     )
     config_path.write_text(json.dumps({

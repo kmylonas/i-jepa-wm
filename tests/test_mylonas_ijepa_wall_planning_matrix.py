@@ -68,6 +68,20 @@ def test_new_matched_mode_uses_only_in_support_cap_and_50_seeds(tmp_path):
         assert "--video-dir" not in argv
 
 
+def test_matched_planning_accepts_training_layout_validation_and_shared_test():
+    from src.mylonas_ijepa_wm.run_wall_planning_matrix import validate_matched_manifests
+
+    fixed, multi = [prepare_manifest(
+        train_episodes=18, val_episodes=18, test_episodes=8,
+        train_layout_mode=mode, collection_profile="matched_alternating",
+        validation_layout_mode="training",
+    ) for mode in ("fixed", "multi")]
+    validate_matched_manifests(multi, fixed)
+    multi["episodes"][-1]["seed"] += 100
+    with pytest.raises(ValueError, match="test assignments"):
+        validate_matched_manifests(multi, fixed)
+
+
 def test_paired_summary_clusters_reused_seed_across_layouts():
     from src.mylonas_ijepa_wm.run_wall_planning_matrix import paired_success_summary
 

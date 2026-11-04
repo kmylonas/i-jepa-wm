@@ -101,6 +101,53 @@ def test_matched_alternating_manifests_pair_policy_by_seed_and_cover_each_layout
         validate_manifest(fixed)
 
 
+def test_training_layout_validation_uses_new_episodes_and_preserves_unseen_test():
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest, validate_manifest
+
+    fixed, multi = [prepare_manifest(
+        train_episodes=90, val_episodes=36, test_episodes=40,
+        train_layout_mode=mode, collection_profile="matched_alternating",
+        validation_layout_mode="training",
+    ) for mode in ("fixed", "multi")]
+    for manifest in (fixed, multi):
+        assert manifest["val_layouts"] == manifest["train_layouts"]
+        assert manifest["validation_layout_mode"] == "training"
+        train = [e for e in manifest["episodes"] if e["split"] == "train"]
+        val = [e for e in manifest["episodes"] if e["split"] == "val"]
+        assert {e["seed"] for e in train}.isdisjoint(e["seed"] for e in val)
+        assert {tuple(e["wall_layout"]) for e in val} == {
+            tuple(e["wall_layout"]) for e in train}
+        for layout in manifest["val_layouts"]:
+            policies = [e["collection_policy"] for e in val if e["wall_layout"] == layout]
+            assert set(policies) == {"wide", "door"}
+            assert all(a != b for a, b in zip(policies, policies[1:]))
+        assert set(map(tuple, manifest["test_layouts"])).isdisjoint(
+            map(tuple, manifest["train_layouts"]))
+        validate_manifest(manifest)
+    assert fixed["val_layouts"] == [[32, 30]]
+    assert len(multi["val_layouts"]) == 9
+    assert [e for e in fixed["episodes"] if e["split"] == "test"] == [
+        e for e in multi["episodes"] if e["split"] == "test"]
+    assert [e["collection_policy"] for e in fixed["episodes"]] == [
+        e["collection_policy"] for e in multi["episodes"]]
+
+
+def test_training_layout_validation_rejects_unseen_validation_or_seen_test():
+    import copy
+    from src.mylonas_ijepa_wm.wall_layout_manifest import prepare_manifest, validate_manifest
+
+    manifest = prepare_manifest(train_episodes=18, val_episodes=18, test_episodes=8,
+                                train_layout_mode="fixed", validation_layout_mode="training")
+    bad_val = copy.deepcopy(manifest)
+    bad_val["val_layouts"] = [[28, 24]]
+    with pytest.raises(ValueError, match="Validation layouts"):
+        validate_manifest(bad_val)
+    bad_test = copy.deepcopy(manifest)
+    _replace_test_layout(bad_test, [32, 22])
+    with pytest.raises(ValueError, match="unseen"):
+        validate_manifest(bad_test)
+
+
 @pytest.mark.parametrize("mutation", [
     lambda m: m["episodes"][1].update(episode_id=0),
     lambda m: m["episodes"][1].update(episode_id=3),

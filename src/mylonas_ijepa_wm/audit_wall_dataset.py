@@ -77,6 +77,10 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
         for split in ("train", "val", "test")
         for layout in manifest[f"{split}_layouts"]
     }
+    training_layouts = {
+        f"{layout[0]},{layout[1]}": _empty_counts()
+        for layout in manifest["train_layouts"]
+    }
     action_hashes = {}
     action_range_violations = []
     for entry in manifest["episodes"]:
@@ -103,13 +107,19 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
         policy = entry["collection_policy"]
         policy_counts = counts["by_policy"].setdefault(policy, _empty_counts())
         counts["policies"][policy] = counts["policies"].get(policy, 0) + 1
+        buckets = [counts, policy_counts]
+        if entry["split"] == "train":
+            train_counts = training_layouts[key]
+            train_policy_counts = train_counts["by_policy"].setdefault(policy, _empty_counts())
+            train_counts["policies"][policy] = train_counts["policies"].get(policy, 0) + 1
+            buckets.extend((train_counts, train_policy_counts))
         lengths = np.linalg.norm(actions, axis=1)
         profile = manifest.get("collection_profile")
         if (profile in {"wide_only", "matched_alternating"}
                 and ((policy == "wide" and np.any(lengths < 0.2 - 1e-5))
                      or np.any(lengths > 3.5 + 1e-5))):
             action_range_violations.append(episode_id)
-        for bucket in (counts, policy_counts):
+        for bucket in buckets:
             bucket["episodes"] += 1
             bucket["actions"] += len(actions)
             bucket["length_gt_1_8"] += int(np.count_nonzero(lengths > 1.8 + 1e-5))
@@ -127,7 +137,7 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
             }.get(label)
             if field is None:
                 continue
-            for bucket in (counts, policy_counts):
+            for bucket in buckets:
                 bucket[field] += 1
                 examples = bucket["examples"].setdefault(label, [])
                 if len(examples) < 3:
@@ -140,7 +150,7 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
     coverage = {}
     for layout in manifest["train_layouts"]:
         key = ",".join(map(str, layout))
-        counts = layouts[key]
+        counts = training_layouts[key]
         left_to_right = counts["door_crossings_left_to_right"]
         right_to_left = counts["door_crossings_right_to_left"]
         coverage[key] = (
@@ -153,7 +163,8 @@ def audit_dataset(raw_dir: Path, manifest: dict) -> dict:
         raise ValueError(f"Action lengths outside policy bounds in episodes {action_range_violations[:5]}")
     return dict(
         manifest_sha256=digest, episode_counts=manifest["episode_counts"],
-        layouts=layouts, action_hashes=action_hashes, coverage_thresholds=thresholds,
+        layouts=layouts, training_layouts=training_layouts,
+        action_hashes=action_hashes, coverage_thresholds=thresholds,
         coverage_by_training_layout=coverage, coverage_pass=all(coverage.values()),
     )
 
@@ -173,7 +184,7 @@ def compare_matched_action_hashes(
     first: dict, second: dict, first_manifest: dict, second_manifest: dict,
     shared_seeds=None,
 ) -> dict:
-    """Check paired wide actions and held-out actions; train door actions depend on layout."""
+    """Check paired actions, allowing doorway actions to depend on layout."""
     first_manifest = validate_manifest(first_manifest)
     second_manifest = validate_manifest(second_manifest)
     first_entries = {entry["seed"]: entry for entry in first_manifest["episodes"]}
@@ -192,9 +203,10 @@ def compare_matched_action_hashes(
         left, right = first_entries[seed], second_entries[seed]
         if left["split"] != right["split"] or left["collection_policy"] != right["collection_policy"]:
             raise ValueError(f"Paired action policy differs for seed {seed}")
-        if left["split"] != "train" and left["wall_layout"] != right["wall_layout"]:
-            raise ValueError(f"Held-out layout differs for seed {seed}")
-        if left["split"] == "train" and left["collection_policy"] == "door":
+        if left["split"] == "test" and left["wall_layout"] != right["wall_layout"]:
+            raise ValueError(f"Test layout differs for seed {seed}")
+        if (left["collection_policy"] == "door" and
+                (left["split"] == "train" or left["wall_layout"] != right["wall_layout"])):
             layout_dependent_train_door += 1
             continue
         left_hash = first["action_hashes"].get(str(seed))

@@ -191,6 +191,36 @@ def validate_planning_result(payload: dict, item: dict, expected_seeds: list[int
     return summarize_run(payload, item["layout"], expected_seeds)
 
 
+def validate_matched_manifests(manifest: dict, fixed_manifest: dict) -> None:
+    """Require paired test episodes while allowing model-specific validation layouts."""
+    if manifest["train_layouts"] != TRAIN_LAYOUTS:
+        raise ValueError("Multi manifest must use the nine planned training layouts")
+    if fixed_manifest["train_layouts"] != [[32, 30]]:
+        raise ValueError("Fixed manifest must train on default [32, 30]")
+    profile = manifest.get("collection_profile")
+    if profile not in {"wide_only", "matched_alternating"} or fixed_manifest.get("collection_profile") != profile:
+        raise ValueError("Matched datasets must use the same supported collection policy")
+    if manifest["max_training_action_length"] != 3.5 or fixed_manifest["max_training_action_length"] != 3.5:
+        raise ValueError("Matched action maxima must be 3.5")
+    if manifest.get("validation_layout_mode", "unseen") != fixed_manifest.get("validation_layout_mode", "unseen"):
+        raise ValueError("Matched validation layout modes differ")
+    if manifest.get("validation_layout_mode", "unseen") == "unseen":
+        left = [entry for entry in manifest["episodes"] if entry["split"] == "val"]
+        right = [entry for entry in fixed_manifest["episodes"] if entry["split"] == "val"]
+        if left != right:
+            raise ValueError("Matched val assignments differ")
+    else:
+        for split in ("train", "val"):
+            left = [(entry["seed"], entry["collection_policy"]) for entry in manifest["episodes"] if entry["split"] == split]
+            right = [(entry["seed"], entry["collection_policy"]) for entry in fixed_manifest["episodes"] if entry["split"] == split]
+            if left != right:
+                raise ValueError(f"Matched {split} seeds and policies differ")
+    left = [entry for entry in manifest["episodes"] if entry["split"] == "test"]
+    right = [entry for entry in fixed_manifest["episodes"] if entry["split"] == "test"]
+    if left != right:
+        raise ValueError("Matched test assignments differ")
+
+
 def run_matrix(
     manifest: dict, env_config: Path, output_root: Path,
     encoder_checkpoint: Path, multi_checkpoint: Path, fixed_checkpoint: Path,
@@ -203,21 +233,9 @@ def run_matrix(
     ).get("metadata", {})
     validate_checkpoint_manifest(multi_metadata, manifest)
     if matched:
-        if manifest["train_layouts"] != TRAIN_LAYOUTS:
-            raise ValueError("Multi manifest must use the nine planned training layouts")
         if fixed_manifest is None:
             raise ValueError("Matched comparison requires a fixed manifest")
-        if fixed_manifest["train_layouts"] != [[32, 30]]:
-            raise ValueError("Fixed manifest must train on default [32, 30]")
-        if manifest.get("collection_profile") != "wide_only" or fixed_manifest.get("collection_profile") != "wide_only":
-            raise ValueError("Matched datasets must use the wide_only policy")
-        if manifest["max_training_action_length"] != 3.5 or fixed_manifest["max_training_action_length"] != 3.5:
-            raise ValueError("Matched action maxima must be 3.5")
-        for split in ("val", "test"):
-            left = [entry for entry in manifest["episodes"] if entry["split"] == split]
-            right = [entry for entry in fixed_manifest["episodes"] if entry["split"] == split]
-            if left != right:
-                raise ValueError(f"Matched {split} assignments differ")
+        validate_matched_manifests(manifest, fixed_manifest)
         fixed_metadata = torch.load(fixed_checkpoint, map_location="cpu", weights_only=True).get("metadata", {})
         validate_checkpoint_manifest(fixed_metadata, fixed_manifest)
     file_identities = {
