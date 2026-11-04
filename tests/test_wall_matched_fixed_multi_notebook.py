@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 import torch
 
-from src.mylonas_ijepa_wm.wall_layout_manifest import manifest_digest, prepare_manifest
+from src.mylonas_ijepa_wm.wall_layout_manifest import (
+    manifest_digest, prepare_manifest, validate_checkpoint_manifest,
+)
 
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks/wall_matched_fixed_multi_colab.ipynb"
@@ -59,6 +61,82 @@ def test_notebook_resume_checks_remaining_cache_and_repairs_bad_pairs():
     assert "EPISODES * LATENT_EPISODE_BYTES" not in source
     assert 'latent_path.unlink(missing_ok=True)' in source
     assert 'trajectory_path.unlink(missing_ok=True)' in source
+
+
+def test_notebook_caps_training_at_20_epochs_and_completes_before_cleanup():
+    notebook = json.loads(NOTEBOOK.read_text())
+    source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert "MAX_EPOCHS = 20" in source
+    assert 'epochs=MAX_EPOCHS' in source
+    assert '"--epochs", str(MAX_EPOCHS)' in source
+    assert 'reconcile_run_identity(mode, paths)' in source
+    execution = "".join(notebook["cells"][7]["source"])
+    assert execution.index('run_model("fixed")') < execution.index('cleanup_model("fixed")')
+
+
+def test_notebook_adopts_incomplete_100_epoch_identity_with_matching_checkpoint(tmp_path):
+    notebook = json.loads(NOTEBOOK.read_text())
+    tree = ast.parse("".join(notebook["cells"][3]["source"]))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"expected_identity", "reconcile_run_identity"}]
+    manifest = prepare_manifest(train_episodes=18, val_episodes=18, test_episodes=8,
+                                train_layout_mode="fixed", collection_profile="matched_alternating",
+                                validation_layout_mode="training")
+    namespace = {
+        "Path": Path, "json": json, "torch": torch, "manifest_digest": manifest_digest,
+        "validate_checkpoint_manifest": validate_checkpoint_manifest,
+        "manifest_for": lambda mode: manifest,
+        "ENCODER_SHA256": "encoder-hash", "SOURCE_COMMIT": "source-hash",
+        "MAX_EPOCHS": 20,
+    }
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
+    expected = namespace["expected_identity"]("fixed")
+    drive = tmp_path / "fixed"
+    checkpoint_dir = drive / "world_model"
+    checkpoint_dir.mkdir(parents=True)
+    paths = {"drive": drive, "checkpoint_dir": checkpoint_dir, "cache": tmp_path / "cache"}
+    identity_path = drive / "run_identity.json"
+    identity_path.write_text(json.dumps({**expected, "epochs": 100}))
+    metadata = {
+        "environment": "wall", "experiment_manifest_sha256": manifest_digest(manifest),
+        "layout_splits": {split: manifest[f"{split}_layouts"] for split in ("train", "val", "test")},
+        **{f"{split}_ids": [entry["episode_id"] for entry in manifest["episodes"]
+                            if entry["split"] == split] for split in ("train", "val", "test")},
+    }
+    for name in ("best.pt", "last.pt"):
+        torch.save({"epoch": 19, "metadata": metadata}, checkpoint_dir / name)
+    namespace["reconcile_run_identity"]("fixed", paths)
+    assert json.loads(identity_path.read_text()) == expected
+    namespace["reconcile_run_identity"]("fixed", paths)
+    assert json.loads(identity_path.read_text()) == expected
+
+
+def test_notebook_rejects_identity_adoption_after_20_epochs(tmp_path):
+    notebook = json.loads(NOTEBOOK.read_text())
+    tree = ast.parse("".join(notebook["cells"][3]["source"]))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"expected_identity", "reconcile_run_identity"}]
+    manifest = prepare_manifest(train_episodes=18, val_episodes=18, test_episodes=8,
+                                train_layout_mode="fixed", collection_profile="matched_alternating",
+                                validation_layout_mode="training")
+    namespace = {
+        "Path": Path, "json": json, "torch": torch, "manifest_digest": manifest_digest,
+        "validate_checkpoint_manifest": validate_checkpoint_manifest,
+        "manifest_for": lambda mode: manifest,
+        "ENCODER_SHA256": "encoder-hash", "SOURCE_COMMIT": "source-hash",
+        "MAX_EPOCHS": 20,
+    }
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
+    drive = tmp_path / "fixed"
+    checkpoint_dir = drive / "world_model"
+    checkpoint_dir.mkdir(parents=True)
+    paths = {"drive": drive, "checkpoint_dir": checkpoint_dir, "cache": tmp_path / "cache"}
+    identity_path = drive / "run_identity.json"
+    identity_path.write_text(json.dumps({**namespace["expected_identity"]("fixed"), "epochs": 100}))
+    torch.save({"epoch": 20, "metadata": {}}, checkpoint_dir / "last.pt")
+    with pytest.raises(AssertionError, match="20 epochs"):
+        namespace["reconcile_run_identity"]("fixed", paths)
+    assert json.loads(identity_path.read_text())["epochs"] == 100
 
 
 def test_notebook_checks_current_identity_and_pilot_actions():
