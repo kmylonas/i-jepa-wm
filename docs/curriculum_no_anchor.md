@@ -54,3 +54,16 @@ experiment reference, not a fixed-data causal estimate of anchoring alone.
 
 Return the executed notebook to compare planning, ranking loss, cost growth
 and the lower-band cost hill. Empirical GPU results remain pending execution.
+
+## Local verification
+
+414 tests passed (4 existing warnings and 16 subtests). A synthetic staged
+CLI run exercised all 840 scheduled episodes, checkpoint resumption,
+read-only historical comparisons and full-range plotting. The final loader
+also rejected corrupt/incomplete checkpoints and mismatched map bindings;
+historical comparison rejected different precision settings. All eight
+notebook code cells compile. The runtime is pinned to
+`8fdb7035a82082ff6166d1150525511e95dc9c6b`.
+
+Real GPU training, Colab dependency installation, Drive mounting and scientific
+outcomes await execution in Colab. Synthetic results only verify the workflow.
