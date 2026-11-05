@@ -7,6 +7,8 @@ __pycache__/
 # Checkpoints and datasets
 src/checkpoints/
 data/
+/data
+/src/checkpoints
 src/datasets/something-something-v2/
 src/mylonas_ijepa_wm/raw/
 src/mylonas_ijepa_wm/raw/ijepa_cache

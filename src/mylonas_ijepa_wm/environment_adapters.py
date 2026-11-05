@@ -147,9 +147,9 @@ class WallAdapter:
         self._make_environment(*self.layout, seed)
         self.env.seed(seed)
         sampled_start, sampled_goal = self.env.generate_random_state(seed)
-        start = sampled_start if start is None else start
-        goal = sampled_goal if goal is None else goal
         for position in (start, goal):
+            if position is None:
+                continue
             point = np.asarray(position, dtype=np.float32)
             lower = self.env.border_padding
             upper = self.env.img_size - 1 - lower
@@ -158,6 +158,8 @@ class WallAdapter:
                     or (self.layout[0] - 3 <= point[0] <= self.layout[0] + 3
                         and abs(point[1] - self.layout[1]) >= 4)):
                 raise ValueError(f"Invalid Wall position: {position}")
+        start = sampled_start if start is None else start
+        goal = sampled_goal if goal is None else goal
         self.env.set_init_state(np.asarray(start, dtype=np.float32))
         _, state = self.env.reset()
         self.goal = np.asarray(goal, dtype=np.float32)
