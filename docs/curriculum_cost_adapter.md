@@ -6,11 +6,18 @@ successes, then measures transfer to farther starts before collecting training
 data from those starts. This is a mechanism pilot, not yet an experiment showing
 that a complete curriculum beats a fixed mixture of starts.
 
-Use `notebooks/curriculum_cost_adapter_colab.ipynb` on a GPU. It consumes a small
-source archive delivered with this branch, so the branch need not be published.
-Copy that archive to the Drive path specified in the notebook, then run cells
-in order. The encoder and matched-v3 fixed checkpoint are the only large input
-artifacts. No historical training cache is required.
+Open `notebooks/curriculum_cost_adapter_colab.ipynb` from the GitHub branch in
+Colab and select a GPU. Its setup cell clones `kmylonas/i-jepa-wm` on branch
+`curriculum-cost-adapter`, prints the exact source commit, and records that
+commit in experiment provenance. Run cells in order. The encoder and matched-v3
+fixed checkpoint are the only large input artifacts. No source archive transfer
+or historical training cache is required.
+
+On a fresh runtime, the notebook clones the current branch. Rerunning setup
+fetches the branch and checks out the current remote commit. Set `SOURCE_COMMIT`
+to the commit recorded in an earlier run's `runtime.json` to reproduce that
+revision. Local source edits stop checkout rather than being overwritten.
+Changed Python source requires a new experiment output directory.
 
 ## Frozen setup
 

@@ -18,8 +18,9 @@ The suite includes the historical released DINO-WM model tests using shared
 local read-only input artifacts. No test modifies those checkpoint files.
 
 The notebook's nine Python code cells compile. CLI help and a tiny modified
-`prepare` configuration run successfully. The delivered source archive also
-receives a separate extraction/import/prepare/provenance check.
+`prepare` configuration run successfully. The Git bootstrap was exercised
+against a temporary clone: fresh clone, fetch/reuse, explicit commit pinning,
+and preservation of local edits all passed.
 
 ## Actual frozen-model smoke check
 
@@ -63,4 +64,5 @@ No review findings were deferred.
   0.5-unit revisit filter. These defaults are fixed and logged, not tuned on
   farther evaluation; a negative result may motivate a separate loss ablation.
 - The branch and worktree are preserved for running/reviewing this pilot.
-  The source archive provides Colab execution without publishing Git history.
+  The Colab notebook clones the published feature branch from GitHub and records
+  its exact commit. `SOURCE_COMMIT` can pin a recorded revision for reproduction.
