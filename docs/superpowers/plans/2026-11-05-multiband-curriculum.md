@@ -1,6 +1,6 @@
 # Multi-band Curriculum Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Run two independent original/clean curricula through three downward bands, updating from each band's experience and displaying comparable raw/adapted MSE maps.
 
@@ -37,10 +37,10 @@
 
 **Interfaces:** Extend fit_adapter(..., initial_adapter=None, balance_bands=False). Warm-start by copying and unfreezing the module, validating dimensions. Band labels use episode['case']['band']; balance only usable bands. Metadata records fresh optimizer, warm start, band and episode sample counts when enabled; default RNG/schema/parameters remain unchanged.
 
-- [ ] Write failing tests for warm-start weights/input immutability, band sampling despite unequal episode counts, invalid dimensions and missing band labels; retain default compatibility tests.
-- [ ] Run pytest -q tests/test_curriculum_replay.py; expect new-argument failures.
-- [ ] Implement optional initialization and sampling, including per-band/episode counts.
-- [ ] Run focused tests; expect all pass; commit isolated fitter change.
+- [x] Write failing tests for warm-start weights/input immutability, band sampling despite unequal episode counts, invalid dimensions and missing band labels; retain default compatibility tests.
+- [x] Run pytest -q tests/test_curriculum_replay.py; expect new-argument failures.
+- [x] Implement optional initialization and sampling, including per-band/episode counts.
+- [x] Run focused tests; expect all pass; commit isolated fitter change.
 
 ### Task 2: Immutable-source sequential runner
 
@@ -48,11 +48,11 @@
 
 **Interfaces:** Protocol prepare/load validation, source references, manifest and case-stage preflight. Runner Curriculum with baseline(runtime), initial(recipe,runtime), band(recipe,index,runtime), and report(render=False). Task 3 adds heatmap calls through the runner's diagnostic methods. CLI stages prepare/baseline/grid/initial/band/report.
 
-- [ ] Write failing synthetic workflow tests for deterministic geometry and source case reuse, train/eval disjointness, paired independent collection, cumulative branch-isolated replay, checkpoint lineage, zero-success stopping, post-update retention evaluations and interrupted resume/provenance rejection.
-- [ ] Run pytest -q tests/test_curriculum_multiband.py; expect missing runner/protocol failures.
-- [ ] Implement source and output checks; fixed manifest; saved goal; stage preflight; raw baseline; branch initialization and current-band evaluation/collection/encoding/update/post-evaluation, using Task 1 fit_adapter options.
-- [ ] Implement report data with raw/current/incoming comparisons, actual interaction journals and unavailable cells. Add runtime journal_stage override with unchanged defaults.
-- [ ] Run focused tests and source hash checks; expect all pass; commit runner.
+- [x] Write failing synthetic workflow tests for deterministic geometry and source case reuse, train/eval disjointness, paired independent collection, cumulative branch-isolated replay, checkpoint lineage, zero-success stopping, post-update retention evaluations and interrupted resume/provenance rejection.
+- [x] Run pytest -q tests/test_curriculum_multiband.py; expect missing runner/protocol failures.
+- [x] Implement source and output checks; fixed manifest; saved goal; stage preflight; raw baseline; branch initialization and current-band evaluation/collection/encoding/update/post-evaluation, using Task 1 fit_adapter options.
+- [x] Implement report data with raw/current/incoming comparisons, actual interaction journals and unavailable cells. Add runtime journal_stage override with unchanged defaults.
+- [x] Run focused tests and source hash checks; expect all pass; commit runner.
 
 ### Task 3: Fixed-grid diagnostics, reporting and standalone Colab
 
@@ -60,10 +60,10 @@
 
 **Interfaces:** prepare_grid(runtime, output, goal, signature), load_grid(output, signature), checkpoint_heatmap(output, recipe, version, adapter, replay_positions, signature), plot_curriculum_report(output, manifest, report). Numeric/cache hashes bind fixed points, preprocessing, execution and goal identities.
 
-- [ ] Write failing tests for grid reuse/hash rejection, numeric raw/adapted/difference maps and invariant raw scale, diagnostic exclusion from fitting, and partial report display.
-- [ ] Run pytest -q tests/test_curriculum_heatmaps.py; expect missing diagnostic module failures.
-- [ ] Implement chunked real-frame grid encoding/cache and three-panel maps with boundaries/replay points, unclipped values and saturation counts; initial and after-update calls; report success/actions matrices, collection paths and losses.
-- [ ] Build Run-all Colab with both independent curricula, immediate heatmap display after every band update, stopped-branch handling and final report/download instructions.
-- [ ] Verify notebook compilation, synthetic full CLI workflow and rendered figures; run full pytest suite; expect all pass.
-- [ ] Commit; request one fresh whole-change review; fix Important/Critical findings with regression tests and full suite.
+- [x] Write failing tests for grid reuse/hash rejection, numeric raw/adapted/difference maps and invariant raw scale, diagnostic exclusion from fitting, and partial report display.
+- [x] Run pytest -q tests/test_curriculum_heatmaps.py; expect missing diagnostic module failures.
+- [x] Implement chunked real-frame grid encoding/cache and three-panel maps with boundaries/replay points, unclipped values and saturation counts; initial and after-update calls; report success/actions matrices, collection paths and losses.
+- [x] Build Run-all Colab with both independent curricula, immediate heatmap display after every band update, stopped-branch handling and final report/download instructions.
+- [x] Verify notebook compilation, synthetic full CLI workflow and rendered figures; run full pytest suite; expect all pass.
+- [x] Commit; request one fresh whole-change review; fix Important/Critical findings with regression tests and full suite.
 - [ ] Pin notebook revision, push current branch, provide direct Colab link; actual GPU results remain pending.

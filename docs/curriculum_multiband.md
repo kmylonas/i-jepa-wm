@@ -111,3 +111,14 @@ or baseline actions as well as before updates.
 Download the executed notebook and return it for interpretation. Local tests
 exercise the staged loop with synthetic episodes; live GPU outcomes remain
 pending until that execution.
+
+## Implementation verification
+
+The final review's three important findings have regression coverage: branch
+report isolation, journal reconciliation and baseline/report grid validation.
+The full local suite passes 389 tests (plus 16 subtests); the notebook's five
+code cells compile. Its runtime is pinned to
+`a854e170c114d4977b91171891201111be16a221`.
+These checks do not measure live GPU outcomes, full-size replay memory or
+Colab/Drive reliability. Failures there can interrupt the run, and successful
+execution still may not improve planning. No minor findings were deferred.
