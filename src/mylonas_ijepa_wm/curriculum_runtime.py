@@ -196,7 +196,8 @@ class PilotRuntime:
                 encoded.append(encoder(images).float().cpu())
         return torch.cat(encoded)
 
-    def run_case(self, case, *, metric=None, capture=False, cost="latent", latent_cost_fn=None):
+    def run_case(self, case, *, metric=None, capture=False, cost="latent", latent_cost_fn=None,
+                 journal_stage=None):
         if latent_cost_fn is not None and (metric is not None or cost != "latent"):
             raise ValueError("explicit latent scorer requires latent cost without an adapter")
         self.load_world_model()
@@ -219,6 +220,8 @@ class PilotRuntime:
         stage = (f"run_{self.args.run_seed}/collect" if capture else
                  f"run_{self.args.run_seed}/evaluate" if metric is not None else
                  "position" if cost == "position" else "baseline")
+        if journal_stage is not None:
+            stage = journal_stage
         with InteractionJournal(self.root, self.runtime_id, stage, case["case_id"]) as journal:
             record = plan_proprio.run_episode(
                 self.env, self.config, self.encoder, self.model, self.metadata,
