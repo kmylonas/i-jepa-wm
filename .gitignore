@@ -64,3 +64,4 @@ src/mylonas_ijepa_wm/wall
 !tests/test_curriculum_cost_pilot.py
 !tests/test_curriculum_experience_audit.py
 !tests/test_curriculum_clean_pair_ablation.py
+!tests/test_curriculum_adjacent_band.py
