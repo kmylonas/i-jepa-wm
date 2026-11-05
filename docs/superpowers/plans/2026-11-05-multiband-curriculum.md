@@ -66,4 +66,4 @@
 - [x] Build Run-all Colab with both independent curricula, immediate heatmap display after every band update, stopped-branch handling and final report/download instructions.
 - [x] Verify notebook compilation, synthetic full CLI workflow and rendered figures; run full pytest suite; expect all pass.
 - [x] Commit; request one fresh whole-change review; fix Important/Critical findings with regression tests and full suite.
-- [ ] Pin notebook revision, push current branch, provide direct Colab link; actual GPU results remain pending.
+- [x] Pin notebook revision, push current branch, provide direct Colab link; actual GPU results remain pending.
