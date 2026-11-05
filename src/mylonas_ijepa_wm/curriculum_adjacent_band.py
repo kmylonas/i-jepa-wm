@@ -35,6 +35,9 @@ def _paths(parent, clean, output):
     for source in (parent, clean):
         if output == source or source in output.parents:
             raise ValueError("evaluation output must be outside both source directories")
+    # Include dangling links: a journal or plot may create its linked target.
+    if output.exists() and any(path.is_symlink() for path in output.rglob("*")):
+        raise ValueError("evaluation output must not contain descendant symlinks")
     return parent, clean, output
 
 
@@ -139,11 +142,37 @@ def _condition(config, condition):
                 sources_digest=digest(config["sources"]))
 
 
+def _preflight_records(root, manifest, runtime_id, condition, identity):
+    stage = _stage(condition)
+    status_path = root / "stages" / f"{stage}.json"
+    signature = dict(runtime_id=runtime_id, cases_digest=digest(manifest["evaluation"]), condition=identity)
+    if status_path.exists():
+        prior = _read(status_path)
+        if any(prior.get(key) != value for key, value in signature.items()):
+            raise ValueError("cached stage provenance differs")
+    folder = root / "episodes" / stage
+    expected = {f"{case['case_id']}.json" for case in manifest["evaluation"]}
+    if any(path.name not in expected for path in folder.glob("*.json")):
+        raise ValueError("cached case provenance differs")
+    for case in manifest["evaluation"]:
+        path = folder / f"{case['case_id']}.json"
+        if not path.exists():
+            continue
+        record = _read(path)
+        if (record.get("case") != case or record.get("case_id") != case["case_id"]
+                or record.get("runtime_id") != runtime_id or record.get("condition") != identity
+                or record.get("raw_path")):
+            raise ValueError("cached episode provenance differs")
+    interaction_budget(root, runtime_id)
+
+
 def evaluate_condition(parent, clean, output, condition, runtime):
     config, manifest = _validated(parent, clean, output)
     root, _ = _runtime(output, config, manifest, condition, runtime.runtime_id)
     if Path(runtime.root).resolve() != root or runtime.manifest != manifest:
         raise ValueError("evaluation runtime root or manifest differs")
+    identity = _condition(config, condition)
+    _preflight_records(root, manifest, runtime.runtime_id, condition, identity)
     metric = None
     if condition != "raw":
         source = config["sources"][condition]
@@ -152,9 +181,16 @@ def evaluate_condition(parent, clean, output, condition, runtime):
     # All conditions share exactly the frozen target used for clean training.
     goal = torch.load(Path(clean) / "run_0/goal_tokens.pt", map_location="cpu", weights_only=True)
     runtime.goal = goal["tokens"].detach().to(runtime.device)
+    target = runtime.goal.clone()
+
+    @torch.no_grad()
+    def raw_score(tokens):
+        return (tokens - target.unsqueeze(0)).square().mean(dim=(1, 2))
+
     return run_stage(root, _stage(condition), manifest["evaluation"], runtime.runtime_id,
-                     lambda case: runtime.run_case(case, metric=metric),
-                     condition=_condition(config, condition))
+                     lambda case: runtime.run_case(case, metric=metric,
+                         **({"latent_cost_fn": raw_score} if condition == "raw" else {})),
+                     condition=identity)
 
 
 def _comparison(raw, adapted, competent):
@@ -216,6 +252,7 @@ def make_report(parent, clean, output, *, render=True):
     records, summaries, signatures = {}, {}, []
     for condition in CONDITIONS:
         root, runtime = _runtime(output, config, manifest, condition)
+        _preflight_records(root, manifest, runtime["runtime_id"], condition, _condition(config, condition))
         signature = dict(runtime["signature"])
         signature.pop("runtime_variant")
         signatures.append(signature)

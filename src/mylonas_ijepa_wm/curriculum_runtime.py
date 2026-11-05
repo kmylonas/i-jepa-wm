@@ -196,11 +196,13 @@ class PilotRuntime:
                 encoded.append(encoder(images).float().cpu())
         return torch.cat(encoded)
 
-    def run_case(self, case, *, metric=None, capture=False, cost="latent"):
+    def run_case(self, case, *, metric=None, capture=False, cost="latent", latent_cost_fn=None):
+        if latent_cost_fn is not None and (metric is not None or cost != "latent"):
+            raise ValueError("explicit latent scorer requires latent cost without an adapter")
         self.load_world_model()
         self.load_encoder()
         # Compute/cache goal before case reset, since goal_tokens itself resets.
-        scorer = adapter_goal_cost(metric, self.goal_tokens()) if metric is not None else None
+        scorer = adapter_goal_cost(metric, self.goal_tokens()) if metric is not None else latent_cost_fn
         initial = self.env.reset(case["seed"], layout=case["layout"], start=case["start"], goal=case["goal"])
         states, frames, steps = [], [], []
 

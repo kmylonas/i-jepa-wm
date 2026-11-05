@@ -3,6 +3,7 @@
 import importlib
 import importlib.util
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -59,9 +60,12 @@ class SyntheticRuntime:
         write_json(self.root / "runtime.json", dict(runtime_id=self.runtime_id, signature=signature))
         self.goal = None
 
-    def run_case(self, case, *, metric=None):
+    def run_case(self, case, *, metric=None, latent_cost_fn=None):
         assert (metric is None) == (self.condition == "raw")
         assert torch.equal(self.goal.cpu(), torch.zeros(1, 4))
+        if self.condition == "raw":
+            assert latent_cost_fn is not None
+            assert torch.equal(latent_cost_fn(torch.full((1, 1, 4), 2.)), torch.tensor([4.]))
         self.visited.append(case["case_id"])
         stage = "baseline" if metric is None else "run_0/evaluate"
         with InteractionJournal(self.root, self.runtime_id, stage, case["case_id"]) as journal:
@@ -206,3 +210,64 @@ def test_retention_uninterpretable_when_raw_incompetent(sources, tmp_path):
     assert not report["raw_competence"]["passed"]
     assert report["comparisons"]["original"]["retention_passed"] is None
     assert report["comparisons"]["clean"]["retention_passed"] is None
+
+
+def test_raw_runtime_forwards_explicit_goal_cost_and_keeps_baseline_journal(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import curriculum_runtime as runtime_module
+    from src.mylonas_ijepa_wm.curriculum_runtime import interaction_budget
+    runtime = SimpleNamespace(
+        root=tmp_path, runtime_id="raw-test", args=SimpleNamespace(videos=False, run_seed=0),
+        manifest={"planning": {}}, config=None, encoder=None, model=None, metadata=None,
+        device=torch.device("cpu"), precision="fp32", load_encoder=lambda: None,
+        load_world_model=lambda: None,
+        env=SimpleNamespace(reset=lambda *a, **kw: None),
+    )
+    def episode(*args, latent_cost_fn=None, observation_observer=None, **kwargs):
+        # This is the planner boundary: the provided scorer must be callable.
+        cost = latent_cost_fn(torch.tensor([[[3., 5.]]]))
+        observation_observer(1, None, [1., 0.])
+        return {"success": True, "final_goal_distance": float(cost[0])}
+    monkeypatch.setattr(runtime_module.plan_proprio, "run_episode", episode)
+    target = torch.tensor([[1., 1.]])
+    score = lambda tokens: (tokens - target.unsqueeze(0)).square().mean(dim=(1, 2))
+    result = runtime_module.PilotRuntime.run_case(runtime,
+        {"case_id": "eval_adjacent_000", "seed": 42, "layout": [32, 30],
+         "start": [45., 26.], "goal": [50., 42.]}, latent_cost_fn=score)
+    assert result["final_goal_distance"] == 10.
+    assert interaction_budget(tmp_path, "raw-test")["by_stage"] == {"baseline": 1}
+
+
+def test_resume_checks_all_cached_records_before_executing_missing_cases(sources, tmp_path):
+    mod, output, manifest, config = prepared(sources, tmp_path)
+    runtime = SyntheticRuntime(output, manifest, config, "original")
+    mod.evaluate_condition(*sources, output, "original", runtime)
+    folder = runtime.root / "episodes/run_0/evaluate"
+    (folder / "eval_adjacent_000.json").unlink()
+    path = folder / "eval_adjacent_019.json"
+    record = json.loads(path.read_text())
+    record["case"]["seed"] += 1
+    write_json(path, record)
+    runtime.visited.clear()
+    with pytest.raises(ValueError, match="provenance"):
+        mod.evaluate_condition(*sources, output, "original", runtime)
+    assert runtime.visited == []
+
+
+def test_dangling_journal_symlink_cannot_write_into_source(sources, tmp_path):
+    mod, output, manifest, config = prepared(sources, tmp_path)
+    runtime = SyntheticRuntime(output, manifest, config, "original")
+    target = sources[0] / "unexpected-journal.jsonl"
+    (runtime.root / "interactions.jsonl").symlink_to(target)
+    with pytest.raises(ValueError, match="symlink|outside"):
+        mod.evaluate_condition(*sources, output, "original", runtime)
+    assert not target.exists() and runtime.visited == []
+
+
+def test_resumed_journal_runtime_checked_before_actions(sources, tmp_path):
+    mod, output, manifest, config = prepared(sources, tmp_path)
+    runtime = SyntheticRuntime(output, manifest, config, "original")
+    with InteractionJournal(runtime.root, "other-runtime", "run_0/evaluate", "old-case"):
+        pass
+    with pytest.raises(ValueError, match="journal provenance"):
+        mod.evaluate_condition(*sources, output, "original", runtime)
+    assert not runtime.visited
