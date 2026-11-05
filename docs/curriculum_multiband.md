@@ -98,6 +98,16 @@ incoming checkpoint. Interrupted simulator actions remain counted and only
 incomplete cases are retried. Use the notebook's pinned source revision to
 resume. A branch stopped for lack of usable experience remains stopped.
 
+Every committed episode must match a complete journal attempt with the same
+stage, case and primitive action count. A missing or inconsistent journal
+blocks further actions. Interrupted attempts and truncated crash lines remain
+supported; truncated lines make reported counts lower bounds. A damaged branch
+is marked invalid in the combined report while the other branch remains
+visible. Valid interaction accounting is retained independently of checkpoint
+validation; unavailable accounting produces an unavailable total and an
+explicit known subtotal. Existing grid bytes are validated before reporting
+or baseline actions as well as before updates.
+
 Download the executed notebook and return it for interpretation. Local tests
 exercise the staged loop with synthetic episodes; live GPU outcomes remain
 pending until that execution.

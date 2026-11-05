@@ -104,6 +104,7 @@ class TinyRuntime:
                 if self.interrupt == case["case_id"] and step == 1:
                     raise RuntimeError("interrupted")
         result = episode_result(case, self.success if capture else True)
+        result["attempt_id"] = journal.identity["attempt_id"]
         result["raw_path"] = None
         if capture:
             path = Path("raw/run_0") / f"{case['case_id']}.pt"
@@ -277,3 +278,79 @@ def test_runtime_journals_explicit_curriculum_stage(tmp_path, monkeypatch):
         "start": [44., 18.], "goal": [50., 42.]}, journal_stage="eval/v1/band_2")
     from src.mylonas_ijepa_wm.curriculum_runtime import interaction_budget
     assert interaction_budget(tmp_path, "stage-test")["by_stage"] == {"eval/v1/band_2": 1}
+
+
+def test_invalid_branch_preserves_other_report_and_valid_budget(curriculum_sources, tmp_path):
+    curriculum = prepared(curriculum_sources, tmp_path)
+    baseline(curriculum)
+    for recipe in ("original", "clean"):
+        runtime = TinyRuntime(curriculum, recipe)
+        curriculum.initial(recipe, runtime)
+        curriculum.band(recipe, 1, runtime)
+    path = curriculum.root / "branches/original/checkpoints/v1.pt"
+    path.write_bytes(path.read_bytes() + b"changed")
+    report = curriculum.report(render=True)
+    assert report["branches"]["original"]["status"] == "invalid"
+    assert "checkpoint" in report["branches"]["original"]["error"]
+    assert report["branches"]["original"]["versions"]["1"]["near"] is None
+    assert report["branches"]["clean"]["versions"]["1"]["near"]["successes"] == 20
+    assert report["total_primitive_interactions"] == 1280
+    assert not report["total_count_is_lower_bound"]
+
+
+@pytest.mark.parametrize("damage", ["missing", "attempt", "stage", "case", "count"])
+def test_damaged_journal_blocks_actions_and_marks_budget_unavailable(curriculum_sources, tmp_path, damage):
+    curriculum = prepared(curriculum_sources, tmp_path)
+    baseline(curriculum)
+    runtime = TinyRuntime(curriculum, "original")
+    curriculum.initial("original", runtime)
+    curriculum.band("original", 1, runtime)
+    path = runtime.root / "interactions.jsonl"
+    if damage == "missing":
+        path.unlink()
+    else:
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        attempt = rows[0]["attempt_id"]
+        if damage == "count":
+            rows = [row for row in rows if not (row["attempt_id"] == attempt and row.get("step") == 4)]
+        else:
+            key = {"attempt": "attempt_id", "stage": "stage", "case": "case_id"}[damage]
+            for row in rows:
+                if row["attempt_id"] == attempt:
+                    row[key] = "changed"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    before = len(runtime.visited)
+    with pytest.raises(ValueError, match="journal"):
+        curriculum.band("original", 2, runtime)
+    assert len(runtime.visited) == before
+    report = curriculum.report()
+    assert report["branches"]["original"]["budget"]["status"] == "unavailable"
+    assert report["branches"]["original"]["budget"]["primitive_interactions"] is None
+    assert report["total_primitive_interactions"] is None
+    assert report["total_count_is_lower_bound"]
+    assert report["known_primitive_interactions"] == 320
+
+
+def test_truncated_interrupted_journal_remains_resumable(curriculum_sources, tmp_path):
+    curriculum = prepared(curriculum_sources, tmp_path)
+    baseline(curriculum)
+    runtime = TinyRuntime(curriculum, "original")
+    curriculum.initial("original", runtime)
+    with (runtime.root / "interactions.jsonl").open("a") as stream:
+        stream.write('{"event":')
+    curriculum.band("original", 1, runtime)
+    report = curriculum.report()
+    assert report["branches"]["original"]["budget"]["count_is_lower_bound"]
+    assert report["total_count_is_lower_bound"]
+
+
+@pytest.mark.parametrize("operation", ["report", "baseline"])
+def test_corrupt_existing_grid_rejected_before_report_or_actions(curriculum_sources, tmp_path, operation):
+    curriculum = prepared(curriculum_sources, tmp_path)
+    runtime = baseline(curriculum)
+    path = curriculum.root / "cache/grid.pt"
+    path.write_bytes(path.read_bytes() + b"changed")
+    before = len(runtime.visited)
+    with pytest.raises(ValueError, match="grid"):
+        curriculum.report() if operation == "report" else curriculum.baseline(runtime)
+    assert len(runtime.visited) == before

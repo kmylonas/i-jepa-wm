@@ -164,6 +164,60 @@ def check_runtime(root, recipe, config, manifest, runtime_id=None):
     return saved["runtime_id"]
 
 
+def validated_budget(root, runtime_id):
+    """Reconcile every committed episode with its complete journal attempt.
+
+    Uncommitted interrupted attempts remain counted; a truncated crash line can
+    only make their count a lower bound, never excuse a missing committed action.
+    """
+    root = Path(root)
+    try:
+        budget = interaction_budget(root, runtime_id)
+    except (KeyError, TypeError) as error:
+        raise ValueError("interaction journal entry is incomplete") from error
+    attempts = {}
+    path = root / "interactions.jsonl"
+    for line in path.read_text().splitlines() if path.exists() else ():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # interaction_budget exposes these as a lower bound.
+        try:
+            identity = (entry["stage"], entry["case_id"])
+            attempt_id, event = entry["attempt_id"], entry["event"]
+            if event == "start":
+                if attempt_id in attempts:
+                    raise ValueError("duplicate journal attempt")
+                attempts[attempt_id] = dict(identity=identity, steps=[], finish=None)
+                continue
+            attempt = attempts[attempt_id]
+            if attempt["identity"] != identity or attempt["finish"] is not None:
+                raise ValueError("journal attempt identity/order differs")
+            if event == "primitive":
+                attempt["steps"].append(entry["step"])
+            elif event == "finish" and entry["status"] in ("complete", "interrupted"):
+                attempt["finish"] = entry["status"]
+            else:
+                raise ValueError("unknown journal event")
+        except (KeyError, TypeError) as error:
+            raise ValueError("interaction journal attempt is incomplete") from error
+    used = set()
+    for path in (root / "episodes").rglob("*.json"):
+        record = read(path)
+        attempt_id = record.get("attempt_id")
+        attempt = attempts.get(attempt_id)
+        stage = path.parent.relative_to(root / "episodes").as_posix()
+        if (attempt is None or attempt_id in used or record.get("runtime_id") != runtime_id
+                or attempt["identity"] != (stage, record.get("case_id"))
+                or attempt["finish"] != "complete"
+                or attempt["steps"] != list(range(1, record["micro_steps"] + 1))):
+            raise ValueError("interaction journal does not match committed episode attempt/stage/case/actions")
+        used.add(attempt_id)
+    budget.setdefault("count_is_lower_bound", False)
+    budget["status"] = "validated"
+    return budget
+
+
 def preflight(root, stage, cases, runtime_id, condition, *, capture=False):
     root = Path(root)
     signature = dict(runtime_id=runtime_id, cases_digest=digest(cases), condition=condition)
@@ -190,7 +244,7 @@ def preflight(root, stage, cases, runtime_id, condition, *, capture=False):
                 raise ValueError("cached collection raw hash/provenance differs")
         elif record.get("raw_path"):
             raise ValueError("evaluation cannot reference collection data")
-    interaction_budget(root, runtime_id)
+    validated_budget(root, runtime_id)
 
 
 def execute_stage(root, stage, cases, runtime_id, condition, execute, *, capture=False):

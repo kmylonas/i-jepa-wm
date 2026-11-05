@@ -67,6 +67,8 @@ class Curriculum:
             if file_sha256(self.parent / item["path"]) != item["sha256"]:
                 raise ValueError("near source replay hash changed")
         protocol.load_goal(self.root, self.config)
+        if any((self.root / f"cache/grid.{suffix}").exists() for suffix in ("pt", "json")):
+            self.require_grid()
 
     def attach(self, runtime, recipe):
         self.guard()
@@ -351,64 +353,91 @@ class Curriculum:
         write_json(root / f"updates/v{index}/band_complete.json", {"checkpoint_sha256": updated_sha, "status": "complete"})
         return status
 
+    def branch_report(self, recipe, raw):
+        root = protocol.runtime_root(self.root, recipe)
+        versions, comparisons, updates, collections, per_case = {}, {}, {}, {}, {}
+        for version in range(4):
+            versions[str(version)], comparisons[str(version)] = {}, {}
+            per_case[str(version)] = {}
+            exists = (root / "runtime.json").exists() and (version == 0 or
+                (root / f"updates/v{version}/status.json").exists() and
+                protocol.read(root / f"updates/v{version}/status.json").get("status") == "complete")
+            if exists:
+                self.checkpoint(recipe, version)
+            for band in protocol.BANDS:
+                rows = self.rows(recipe, version, band, optional=True) if exists else None
+                versions[str(version)][band] = summarize(rows) if rows is not None else None
+                per_case[str(version)][band] = case_results(rows) if rows is not None else None
+                if rows is not None:
+                    block = {"vs_raw": compare(raw[band], rows) if raw[band] is not None else None}
+                    earlier = self.rows(recipe, version-1, band, optional=True) if version else None
+                    block["vs_incoming"] = compare(earlier, rows) if earlier is not None else None
+                    comparisons[str(version)][band] = block
+            if version and (root / f"updates/v{version}/status.json").exists():
+                updates[str(version)] = protocol.read(root / f"updates/v{version}/status.json")
+        rid = protocol.check_runtime(self.root, recipe, self.config, self.manifest) if (root / "runtime.json").exists() else None
+        for index, band in enumerate(protocol.BANDS[1:], 1):
+            stage_path = root / "stages" / f"collect/{band}.json"
+            if rid and stage_path.exists():
+                sha = self.reference(recipe, index-1)[1]
+                records = protocol.optional_stage(root, f"collect/{band}", self.manifest["collection"][band], rid,
+                    self.identity(recipe, index-1, sha), capture=True)
+                collections[band] = summarize(records) if records is not None else None
+            else:
+                collections[band] = None
+        state = "not_started" if all(row is None for rows in versions.values() for row in rows.values()) else "active"
+        if (root / "stopped.json").exists():
+            state = "stopped"
+        elif (root / "updates/v3/band_complete.json").exists():
+            state = "complete"
+        return dict(status=state, versions=versions, comparisons=comparisons, updates=updates,
+            collections=collections, per_case=per_case,
+            stopped=protocol.read(root / "stopped.json") if state == "stopped" else None)
+
+    def report_budget(self, recipe):
+        root = protocol.runtime_root(self.root, recipe)
+        try:
+            if not (root / "runtime.json").exists():
+                if (root / "interactions.jsonl").exists() or any((root / "episodes").rglob("*.json")):
+                    raise ValueError("interaction accounting has no runtime identity")
+                return dict(status="not_started", primitive_interactions=0, count_is_lower_bound=False)
+            rid = protocol.check_runtime(self.root, recipe, self.config, self.manifest)
+            return protocol.validated_budget(root, rid)
+        except (ValueError, OSError, KeyError) as error:
+            return dict(status="unavailable", primitive_interactions=None,
+                        count_is_lower_bound=True, error=str(error))
+
     def report(self, *, render=False):
         self.guard()
-        raw = {}
-        for band in protocol.BANDS:
-            path = protocol.runtime_root(self.root, "raw") / "runtime.json"
-            raw[band] = self.rows("raw", 0, band, optional=True) if path.exists() else None
+        raw_error = None
+        try:
+            raw_root = protocol.runtime_root(self.root, "raw")
+            raw = {band: self.rows("raw", 0, band, optional=True)
+                   if (raw_root / "runtime.json").exists() else None for band in protocol.BANDS}
+        except (ValueError, OSError, KeyError) as error:
+            raw, raw_error = dict.fromkeys(protocol.BANDS), str(error)
         branches = {}
-        total = 0
         for recipe in protocol.RECIPES:
-            root = protocol.runtime_root(self.root, recipe)
-            versions, comparisons, updates, collections, per_case = {}, {}, {}, {}, {}
-            for version in range(4):
-                versions[str(version)], comparisons[str(version)] = {}, {}
-                per_case[str(version)] = {}
-                exists = (root / "runtime.json").exists() and (version == 0 or
-                    (root / f"updates/v{version}/status.json").exists() and
-                    protocol.read(root / f"updates/v{version}/status.json").get("status") == "complete")
-                if exists:
-                    self.checkpoint(recipe, version)
-                for band in protocol.BANDS:
-                    rows = self.rows(recipe, version, band, optional=True) if exists else None
-                    versions[str(version)][band] = summarize(rows) if rows is not None else None
-                    per_case[str(version)][band] = case_results(rows) if rows is not None else None
-                    if rows is not None:
-                        block = {"vs_raw": compare(raw[band], rows) if raw[band] is not None else None}
-                        earlier = self.rows(recipe, version-1, band, optional=True) if version else None
-                        block["vs_incoming"] = compare(earlier, rows) if earlier is not None else None
-                        comparisons[str(version)][band] = block
-                if version and (root / f"updates/v{version}/status.json").exists():
-                    updates[str(version)] = protocol.read(root / f"updates/v{version}/status.json")
-            rid = protocol.check_runtime(self.root, recipe, self.config, self.manifest) if (root / "runtime.json").exists() else None
-            for index, band in enumerate(protocol.BANDS[1:], 1):
-                stage_path = root / "stages" / f"collect/{band}.json"
-                if rid and stage_path.exists():
-                    sha = self.reference(recipe, index-1)[1]
-                    records = protocol.optional_stage(root, f"collect/{band}", self.manifest["collection"][band], rid,
-                        self.identity(recipe, index-1, sha), capture=True)
-                    collections[band] = summarize(records) if records is not None else None
-                else:
-                    collections[band] = None
-            budget = interaction_budget(root, rid) if rid else {"primitive_interactions": 0, "interrupted_attempts": 0}
-            total += budget["primitive_interactions"]
-            state = "not_started" if all(row is None for rows in versions.values() for row in rows.values()) else "active"
-            if (root / "stopped.json").exists():
-                state = "stopped"
-            elif (root / "updates/v3/band_complete.json").exists():
-                state = "complete"
-            branches[recipe] = dict(status=state, versions=versions, comparisons=comparisons, updates=updates,
-                collections=collections, budget=budget, per_case=per_case,
-                stopped=protocol.read(root / "stopped.json") if state == "stopped" else None)
-        raw_root = protocol.runtime_root(self.root, "raw")
-        raw_rid = protocol.check_runtime(self.root, "raw", self.config, self.manifest) if (raw_root / "runtime.json").exists() else None
-        raw_budget = interaction_budget(raw_root, raw_rid) if raw_rid else {"primitive_interactions": 0}
+            try:
+                branch = self.branch_report(recipe, raw)
+            except (ValueError, OSError, KeyError) as error:
+                empty = lambda: {str(version): dict.fromkeys(protocol.BANDS) for version in range(4)}
+                branch = dict(status="invalid", error=str(error), versions=empty(), per_case=empty(),
+                              comparisons={}, updates={}, collections=dict.fromkeys(protocol.BANDS[1:]), stopped=None)
+            branch["budget"] = self.report_budget(recipe)
+            branches[recipe] = branch
+        raw_budget = self.report_budget("raw")
+        budgets = [raw_budget, *(branch["budget"] for branch in branches.values())]
+        known = sum(budget["primitive_interactions"] for budget in budgets
+                    if budget["primitive_interactions"] is not None)
+        unavailable = any(budget["primitive_interactions"] is None for budget in budgets)
         result = dict(schema_version=1, experiment=self.config, bounds=self.manifest["bounds"],
                       raw={key: summarize(rows) if rows is not None else None for key, rows in raw.items()},
                       raw_per_case={key: case_results(rows) if rows is not None else None for key, rows in raw.items()},
-                      raw_budget=raw_budget, branches=branches,
-                      total_primitive_interactions=total+raw_budget["primitive_interactions"],
+                      raw_budget=raw_budget, raw_error=raw_error, branches=branches,
+                      total_primitive_interactions=None if unavailable else known,
+                      known_primitive_interactions=known,
+                      total_count_is_lower_bound=any(budget["count_is_lower_bound"] for budget in budgets),
                       diagnostic_primitive_interactions=0,
                       note="Repeated monitoring cases; operational screens are not significance claims. Each branch learns from its own policy's successes.")
         write_json(self.root / "report.json", result)
