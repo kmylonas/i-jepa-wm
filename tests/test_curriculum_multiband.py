@@ -457,3 +457,37 @@ def test_partial_no_anchor_initial_fit_is_not_reported_as_evaluated(curriculum_s
     with pytest.raises(ValueError, match='initial|inputs'):
         free.initial('original', runtime)
     assert not runtime.visited
+
+
+def test_historical_comparison_is_read_only_and_marks_missing_versions(curriculum_sources, tmp_path):
+    anchored = prepared(curriculum_sources, tmp_path)
+    baseline(anchored)
+    anchored.initial('original', TinyRuntime(anchored, 'original'))
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    baseline(free)
+    free.initial('original', TinyRuntime(free, 'original'))
+    before = file_hashes(anchored.root)
+    name = 'src.mylonas_ijepa_wm.curriculum_ablation_report'
+    assert importlib.util.find_spec(name), 'historical comparison helper missing'
+    helper = importlib.import_module(name)
+    report = helper.compare_historical(free, anchored.root)
+    cell = report['branches']['original']['versions']['0']['near']
+    assert cell['anchored']['successes'] == cell['without_anchor']['successes'] == 20
+    assert cell['paired']['wins'] == cell['paired']['losses'] == 0
+    assert report['branches']['original']['versions']['1']['band_1'] is None
+    assert report['branches']['clean']['versions']['0']['near'] is None
+    assert file_hashes(anchored.root) == before
+    with pytest.raises(ValueError, match='cases|settings'):
+        free.manifest['evaluation']['near'][0]['seed'] += 1
+        helper.compare_historical(free, anchored.root)
+
+
+def test_historical_comparison_rejects_output_aliases(curriculum_sources, tmp_path):
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    name = 'src.mylonas_ijepa_wm.curriculum_ablation_report'
+    assert importlib.util.find_spec(name), 'historical comparison helper missing'
+    helper = importlib.import_module(name)
+    alias = tmp_path / 'baseline-alias'; alias.symlink_to(free.root, target_is_directory=True)
+    for path in (free.root, alias, free.root / 'nested'):
+        with pytest.raises(ValueError, match='separate'):
+            helper.compare_historical(free, path)

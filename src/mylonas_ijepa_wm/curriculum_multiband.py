@@ -462,12 +462,13 @@ class Curriculum:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=["prepare", "baseline", "grid", "initial", "band", "report"])
+    parser.add_argument("stage", choices=["prepare", "baseline", "grid", "initial", "band", "report", "compare"])
     for name in ("parent-dir", "clean-dir", "adjacent-dir", "output-dir"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--recipe", choices=protocol.RECIPES)
     parser.add_argument("--band-index", type=int, choices=[1, 2, 3])
     parser.add_argument('--without-anchor', action='store_true', help='prepare: retrain v0 from identity and disable anchoring in all fits')
+    parser.add_argument('--baseline-dir', type=Path, help='compare: read-only anchored curriculum root')
     for name in ("world-model-checkpoint", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--expected-world-model-sha256", default=EXPECTED_WM)
@@ -484,7 +485,12 @@ def main(argv=None):
         result = prepare(*paths, without_anchor=args.without_anchor)
     else:
         curriculum = Curriculum(*paths)
-        if args.stage == "report":
+        if args.stage == 'compare':
+            if args.baseline_dir is None:
+                raise ValueError('compare requires --baseline-dir')
+            from src.mylonas_ijepa_wm.curriculum_ablation_report import compare_historical
+            result = compare_historical(curriculum, args.baseline_dir)
+        elif args.stage == "report":
             result = curriculum.report(render=True)
         else:
             if any(getattr(args, name) is None for name in ("world_model_checkpoint", "encoder_checkpoint", "dino_wm_root")):
@@ -514,6 +520,9 @@ def main(argv=None):
         if "inputs" in result:
             console.update(recipe=result["inputs"]["recipe"], version=result["inputs"]["version"],
                            replay_episodes=len(result["inputs"]["replay"]))
+    elif args.stage == 'compare':
+        console = dict(comparison=str(curriculum.root / 'anchor_comparison.json'),
+                       branch_errors={key: row['error'] for key, row in result['branches'].items()})
     elif args.stage == "report":
         console = dict(raw=result["raw"], total_primitive_interactions=result["total_primitive_interactions"],
             branches={key: {field: row[field] for field in ("status", "versions", "collections", "budget", "stopped")}
