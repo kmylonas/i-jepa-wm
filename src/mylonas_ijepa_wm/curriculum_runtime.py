@@ -144,6 +144,11 @@ class PilotRuntime:
                          dino_commit=DINO_COMMIT, torch_version=str(torch.__version__),
                          device_type=self.device.type, precision=self.precision,
                          encoder_batch_size=args.encoder_batch_size)
+        runtime_variant = getattr(args, "runtime_signature_extra", None)
+        if runtime_variant is not None:
+            if not isinstance(runtime_variant, dict):
+                raise ValueError("runtime signature extension must be a dictionary")
+            signature["runtime_variant"] = runtime_variant
         self.runtime_id = digest(signature)
         path = self.root / "runtime.json"
         if path.exists() and json.loads(path.read_text())["runtime_id"] != self.runtime_id:

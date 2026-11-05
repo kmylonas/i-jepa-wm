@@ -79,10 +79,13 @@ def file_hashes(root):
 
 
 def write_child_runtime(root, runtime_id="child-runtime"):
+    clean = ablation_module()
     manifest = json.loads((root / "manifest.json").read_text())
+    config = json.loads((root / "ablation.json").read_text())
     write_json(root / "runtime.json", dict(runtime_id=runtime_id,
                                              signature={"manifest": digest(manifest),
-                                                        "models": {"world_model": "wm", "encoder": "enc"}}))
+                                                        "models": {"world_model": "wm", "encoder": "enc"},
+                                                        "runtime_variant": clean.runtime_variant(config)}))
     return runtime_id
 
 
@@ -101,6 +104,15 @@ def test_prepare_validates_complete_parent_and_never_mutates_it(parent_pilot, tm
     assert file_hashes(parent_pilot) == before
     assert clean.prepare_ablation(parent_pilot, child) == config
 
+    with pytest.raises(ValueError, match="outside the parent"):
+        clean.prepare_ablation(parent_pilot, parent_pilot)
+    with pytest.raises(ValueError, match="outside the parent"):
+        clean.prepare_ablation(parent_pilot, parent_pilot / "child")
+    alias = tmp_path / "parent-alias"
+    alias.symlink_to(parent_pilot, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside the parent"):
+        clean.prepare_ablation(parent_pilot, alias / "child")
+
     (parent_pilot / "report.json").unlink()
     with pytest.raises(ValueError, match="complete parent"):
         clean.prepare_ablation(parent_pilot, tmp_path / "other")
@@ -114,7 +126,7 @@ def test_changed_parent_replay_is_rejected_after_prepare(parent_pilot, tmp_path)
     saved = torch.load(replay, weights_only=True)
     saved["states"][0, 0] += 1
     torch.save(saved, replay)
-    with pytest.raises(ValueError, match="replay.*changed"):
+    with pytest.raises(ValueError, match="parent.*changed|replay.*changed"):
         clean.load_parent_replay(parent_pilot, child)
 
 
@@ -143,6 +155,58 @@ def test_clean_training_saves_goal_rule_and_parent_child_provenance(parent_pilot
                             goal=lambda: pytest.fail("completed training must resume"), device="cpu")
     assert checkpoint.stat().st_mtime_ns == first_mtime
     assert file_hashes(parent_pilot) == parent_before
+
+
+@pytest.mark.parametrize("artifact", ["run_0/adapter.pt", "run_0/goal_tokens.pt"])
+def test_completed_training_rejects_changed_artifacts(parent_pilot, tmp_path, artifact):
+    clean = ablation_module()
+    child = tmp_path / "clean_pair_v1"
+    clean.prepare_ablation(parent_pilot, child)
+    runtime_id = write_child_runtime(child)
+    clean.train_clean_stage(parent_pilot, child, runtime_id, goal=torch.zeros(1, 4), device="cpu")
+    path = child / artifact
+    saved = torch.load(path, weights_only=True)
+    if artifact.endswith("adapter.pt"):
+        key = next(iter(saved["adapter"]))
+        saved["adapter"][key].view(-1)[0] += 1
+    else:
+        saved["tokens"].view(-1)[0] += 1
+    torch.save(saved, path)
+    with pytest.raises(ValueError, match="hash differs"):
+        clean.train_clean_stage(parent_pilot, child, runtime_id,
+                                goal=lambda: pytest.fail("must not recompute"), device="cpu")
+
+
+def test_child_runtime_must_be_distinct_and_condition_bound(parent_pilot, tmp_path):
+    clean = ablation_module()
+    child = tmp_path / "clean_pair_v1"
+    config = clean.prepare_ablation(parent_pilot, child)
+    write_child_runtime(child, config["parent_runtime_id"])
+    with pytest.raises(ValueError, match="distinct"):
+        clean.train_clean_stage(parent_pilot, child, config["parent_runtime_id"],
+                                goal=torch.zeros(1, 4), device="cpu")
+
+    write_child_runtime(child)
+    runtime = json.loads((child / "runtime.json").read_text())
+    runtime["signature"]["runtime_variant"]["ablation_digest"] = "wrong"
+    write_json(child / "runtime.json", runtime)
+    with pytest.raises(ValueError, match="provenance"):
+        clean.train_clean_stage(parent_pilot, child, "child-runtime",
+                                goal=torch.zeros(1, 4), device="cpu")
+
+
+def test_evaluation_preflight_rejects_parent_change_before_loading_adapter(parent_pilot, tmp_path):
+    clean = ablation_module()
+    child = tmp_path / "clean_pair_v1"
+    clean.prepare_ablation(parent_pilot, child)
+    runtime_id = write_child_runtime(child)
+    clean.train_clean_stage(parent_pilot, child, runtime_id, goal=torch.zeros(1, 4), device="cpu")
+    replay = next((parent_pilot / "replay/run_0").glob("*.pt"))
+    saved = torch.load(replay, weights_only=True)
+    saved["states"][0, 0] += 1
+    torch.save(saved, replay)
+    with pytest.raises(ValueError, match="parent.*changed|replay.*changed"):
+        clean.load_clean_evaluation(parent_pilot, child, runtime_id, device="cpu")
 
 
 def test_report_pairs_parent_and_child_runtimes_and_applies_clean_screen(parent_pilot, tmp_path):

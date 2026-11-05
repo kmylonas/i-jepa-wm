@@ -37,4 +37,7 @@ finding that the replay never visited the far-start region.
 The child directory records the parent runtime and adapter hashes, every replay
 file hash, the exact pair rule, the newly computed goal-token hash, the child
 runtime and the clean adapter hash. Rerunning completed stages validates these
-identities and resumes complete artifacts instead of mixing conditions.
+identities and resumes complete artifacts instead of mixing conditions. The
+child runtime identity is also bound to this ablation configuration and must
+differ from the parent runtime identity. Evaluation repeats the parent and
+artifact integrity checks before taking any simulator actions.
