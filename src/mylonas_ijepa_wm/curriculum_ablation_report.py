@@ -7,6 +7,49 @@ import torch
 
 from src.mylonas_ijepa_wm import curriculum_multiband_protocol as protocol
 from src.mylonas_ijepa_wm.curriculum_protocol import write_json
+from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256
+
+
+def validated_heatmaps(curriculum):
+    """Select numeric maps bound to completed, currently valid checkpoints."""
+    report = curriculum.report()
+    grid = curriculum.require_grid()
+    signature = curriculum.grid_signature()
+    maps, errors = {}, {}
+    for recipe in protocol.RECIPES:
+        maps[recipe] = {}
+        branch = report['branches'][recipe]
+        if branch['status'] == 'invalid':
+            errors[recipe] = branch['error']
+            continue
+        try:
+            for version, band in enumerate(protocol.BANDS):
+                if branch['versions'][str(version)][band] is None:
+                    continue
+                folder = curriculum.root / f'branches/{recipe}/heatmaps'
+                path = folder / f'v{version}.json'
+                if not path.exists():
+                    continue
+                commit = protocol.read(folder / f'v{version}.commit.json')
+                data = protocol.read(path)
+                expected = dict(recipe=recipe, version=version,
+                    checkpoint_sha256=curriculum.reference(recipe, version)[1],
+                    grid_sha256=grid['sha256'], signature=signature)
+                if (commit.get('data_sha256') != file_sha256(path)
+                        or commit.get('image_sha256') != file_sha256(folder / f'v{version}.png')
+                        or any(commit.get('inputs', {}).get(key) != value for key, value in expected.items())
+                        or any(data.get(key) != value for key, value in commit['inputs'].items())
+                        or data.get('points') != grid['points'].tolist()
+                        or data.get('raw') != grid['raw_costs'].tolist()):
+                    raise ValueError(f'{recipe} v{version}: map checkpoint/grid provenance differs')
+                adapted = torch.as_tensor(data['adapted'])
+                if (adapted.shape != grid['raw_costs'].shape
+                        or not torch.isfinite(adapted).all() or (adapted < 0).any()):
+                    raise ValueError(f'{recipe} v{version}: invalid adapted costs')
+                maps[recipe][version] = data
+        except (ValueError, OSError, KeyError) as error:
+            maps[recipe], errors[recipe] = {}, str(error)
+    return dict(maps=maps, errors=errors)
 
 
 def compare_historical(curriculum, baseline_dir):
@@ -29,6 +72,13 @@ def compare_historical(curriculum, baseline_dir):
                     for root in ('raw', 'branches/original', 'branches/clean'))):
         raise ValueError('historical baseline execution metadata is missing')
     baseline.guard()
+    if (baseline.root / 'execution.json').exists() and (curriculum.root / 'execution.json').exists():
+        # Manifest and source fingerprints necessarily differ for this ablation.
+        # Precision, model and environment settings must still match exactly.
+        execution = lambda root: {key: value for key, value in protocol.read(root / 'execution.json').items()
+                                  if key not in ('manifest', 'source')}
+        if execution(baseline.root) != execution(curriculum.root):
+            raise ValueError('historical comparison execution settings/precision differ')
     current = curriculum.report()
     branches = {}
     for recipe in protocol.RECIPES:

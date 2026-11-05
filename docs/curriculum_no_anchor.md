@@ -35,13 +35,17 @@ and vertical profiles use one expanded range across all available versions
 and both recipes. Cost growth is visible rather than hidden by the old raw
 color ceiling. The report stores actual numeric costs, outcome matrices,
 case paths, replay sizes, loss histories and actual interaction budgets.
+Final plots admit maps only after validating completed checkpoint lineage,
+the saved map hashes, and their binding to the current checkpoint and grid.
+An invalid recipe is omitted while valid results from the other remain visible.
 
 The `compare` CLI stage reads the old anchored cases without running episodes
 or rewriting that source. It checks identical cases, planning/fitting settings
 apart from anchor weight, source artifacts and shared goal. Missing cells are
 unavailable, not zeros. `anchor_comparison.json` records paired wins/losses
 and action counts. A damaged historical recipe does not hide the other's
-comparisons.
+comparisons. Execution settings, including precision and encoder batch size,
+must also match; an incompatible historical run is reported as unavailable.
 
 The historical original near fit did not persist its target tokens, while
 both new initial fits use the shared saved target. Policy-dependent collection

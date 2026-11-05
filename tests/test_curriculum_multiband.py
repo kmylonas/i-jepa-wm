@@ -491,3 +491,54 @@ def test_historical_comparison_rejects_output_aliases(curriculum_sources, tmp_pa
     for path in (free.root, alias, free.root / 'nested'):
         with pytest.raises(ValueError, match='separate'):
             helper.compare_historical(free, path)
+
+
+@pytest.mark.parametrize('damage', ['checkpoint', 'incomplete_status', 'map_binding'])
+def test_diagnostic_maps_omit_rejected_initial_versions_and_keep_valid_branch(curriculum_sources, tmp_path, damage):
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    baseline(free)
+    for recipe in ('original', 'clean'):
+        free.initial(recipe, TinyRuntime(free, recipe))
+    root = free.root / 'branches/original'
+    if damage == 'checkpoint':
+        path = root / 'checkpoints/v0.pt'
+        path.write_bytes(path.read_bytes() + b'changed')
+    elif damage == 'incomplete_status':
+        path = root / 'updates/v0/status.json'
+        status = json.loads(path.read_text()); status['status'] = 'training'
+        write_json(path, status)
+    else:
+        path = root / 'heatmaps/v0.json'
+        data = json.loads(path.read_text()); data['checkpoint_sha256'] = 'wrong'
+        write_json(path, data)
+        path = root / 'heatmaps/v0.commit.json'
+        commit = json.loads(path.read_text())
+        commit['inputs']['checkpoint_sha256'] = 'wrong'
+        commit['data_sha256'] = file_sha256(root / 'heatmaps/v0.json')
+        write_json(path, commit)
+    helper = importlib.import_module('src.mylonas_ijepa_wm.curriculum_ablation_report')
+    selection = helper.validated_heatmaps(free)
+    assert selection['maps']['original'] == {}
+    assert list(selection['maps']['clean']) == [0]
+    assert selection['maps']['clean'][0]['recipe'] == 'clean'
+
+
+def test_historical_comparison_rejects_cross_run_precision_difference(curriculum_sources, tmp_path):
+    class BfloatRuntime(TinyRuntime):
+        def __init__(self, curriculum, recipe):
+            super().__init__(curriculum, recipe)
+            path = self.root / 'runtime.json'
+            saved = json.loads(path.read_text())
+            saved['signature']['precision'] = self.precision = 'bf16'
+            saved['runtime_id'] = self.runtime_id = digest(saved['signature'])
+            write_json(path, saved)
+    anchored = prepared(curriculum_sources, tmp_path)
+    raw = BfloatRuntime(anchored, 'raw')
+    anchored.grid(raw); anchored.baseline(raw)
+    anchored.initial('original', BfloatRuntime(anchored, 'original'))
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    baseline(free)
+    free.initial('original', TinyRuntime(free, 'original'))
+    helper = importlib.import_module('src.mylonas_ijepa_wm.curriculum_ablation_report')
+    with pytest.raises(ValueError, match='execution|precision'):
+        helper.compare_historical(free, anchored.root)
