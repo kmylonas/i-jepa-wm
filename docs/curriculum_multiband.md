@@ -138,3 +138,26 @@ are joined without estimating unmeasured grid points. Real-image profiles do
 not establish the ordering of world-model predictions or feasible actions.
 PNG/PDF figures are saved in `diagnostics/cost_profiles`; no simulation,
 training, checkpoint loading or changes to existing artifacts are needed.
+
+## Checking the nonzero cost at the physical goal
+
+`notebooks/curriculum_goal_consistency_colab.ipynb` runs a separate GPU
+diagnostic using the same frozen image encoder and pinned Wall renderer.
+It reads the existing multi-band and clean-pair caches, and writes a new
+timestamped folder under `goal_consistency_audit_v1`. It executes no actions,
+fits no adapter and loads no world-model checkpoint.
+
+First it checks the clean source goal, its copied target, the grid's embedded
+target and the exact grid point (50,42). It validates cache hashes and
+recomputes the saved raw goal MSE. Then it compares fresh goal/grid/reset
+images at the pixel level. Identical pixels are encoded singly and in
+eight-image batches, including the original eight-position grid row. Fresh
+tokens are compared with both cached representations. All comparisons repeat
+under strict FP32 arithmetic with TF32 disabled, recording execution settings.
+
+The diagnostic distinguishes measurements from historical conclusions:
+the original goal image and every arithmetic flag were not saved. Fresh
+pixel equality cannot prove historical pixel equality, and current arithmetic
+differences alone cannot establish the previous runtime's settings. The
+executed notebook and `report.json` should be inspected before replacing a
+target or changing the experiment. Source hashes are rechecked after probing.
