@@ -19,6 +19,7 @@ tests/*
 ijepa_cache/
 .worktrees/
 .superpowers/
+/output/
 src/mylonas_ijepa_wm/position_probe_runs/
 *.npy
 

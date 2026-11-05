@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -103,7 +104,7 @@ def test_training_stops_with_status_instead_of_checkpoint_on_no_success(tmp_path
     assert not (tmp_path / "run_0/adapter.pt").exists()
 
 
-def test_candidate_audit_replays_complete_horizon_and_counts_extra_interactions():
+def test_candidate_audit_replays_complete_horizon_and_counts_extra_interactions(tmp_path):
     name = "src.mylonas_ijepa_wm.curriculum_diagnostics"
     assert importlib.util.find_spec(name), "pilot diagnostics missing"
     diagnostics = importlib.import_module(name)
@@ -122,6 +123,8 @@ def test_candidate_audit_replays_complete_horizon_and_counts_extra_interactions(
     class Runtime:
         env = Environment()
         device = torch.device("cpu")
+        root = tmp_path
+        runtime_id = "test"
 
         def goal_tokens(self):
             return torch.tensor([[2., 0.]])
@@ -130,7 +133,7 @@ def test_candidate_audit_replays_complete_horizon_and_counts_extra_interactions(
             return torch.as_tensor(np.stack(frames)).reshape(-1, 1, 2)
 
     candidates = [dict(source="final_elite", predicted_cost=0., actions=np.array([[1., 0.] * 5]))]
-    rows, interactions = diagnostics.replay_audit(Runtime(), dict(seed=3, layout=[32, 30], start=[0., 0.], goal=[2., 0.]), candidates)
+    rows, interactions = diagnostics.replay_audit(Runtime(), dict(seed=3, case_id="eval_0", layout=[32, 30], start=[0., 0.], goal=[2., 0.]), candidates)
     assert interactions == 5
     assert rows[0]["reached_goal"]
     assert rows[0]["actual_distance"] == 3
@@ -196,3 +199,120 @@ def test_source_archive_keeps_original_revision_without_git_metadata(tmp_path):
     assert metadata == {"source_commit": "abc123", "source_dirty": False, "source_kind": "archive"}
     (source / "example.py").write_text("value = 2\n")
     assert runtime.repository_provenance(tmp_path)["source_dirty"]
+
+
+def test_retention_screen_counts_lost_tasks_even_when_other_near_tasks_improve():
+    pilot = pilot_module()
+    cases = pilot.make_manifest(eval_per_band=10)["evaluation"]
+    raw = [result(case, index < 6) for index, case in enumerate(cases)]
+    adapted = [result(case, index in range(2, 9) or index in (10, 11)) for index, case in enumerate(cases)]
+    report = pilot.paired_report(raw, adapted)
+    assert report["near"]["success_change"] == 1
+    assert report["near"]["losses"] == 2
+    assert not report["screen_passed"]
+
+
+def test_interrupted_diagnostic_replays_are_durably_counted(tmp_path):
+    from src.mylonas_ijepa_wm import curriculum_diagnostics as diagnostics
+    from src.mylonas_ijepa_wm.curriculum_runtime import interaction_budget
+
+    class Environment:
+        fail = True
+
+        def reset(self, *args, **kwargs):
+            self.calls = 0
+
+        def step(self, action):
+            self.calls += 1
+            if self.fail and self.calls == 3:
+                raise RuntimeError("interrupted simulator audit")
+            return SimpleNamespace(state=np.array([self.calls, 0.]), success=False)
+
+        def render(self):
+            return np.zeros((1, 1, 2))
+
+    runtime = SimpleNamespace(root=tmp_path, runtime_id="test", env=Environment(), device=torch.device("cpu"),
+                              goal_tokens=lambda: torch.zeros(1, 2), encode_frames=lambda frames: torch.zeros(len(frames), 1, 2))
+    case = dict(seed=3, case_id="eval_near_0", layout=[32, 30], start=[0, 0], goal=[2, 0])
+    candidates = [dict(source="final_elite", predicted_cost=0., actions=np.array([[1., 0.] * 5]))]
+    with pytest.raises(RuntimeError, match="interrupted"):
+        diagnostics.replay_audit(runtime, case, candidates)
+    runtime.env.fail = False
+    diagnostics.replay_audit(runtime, case, candidates)
+    assert interaction_budget(tmp_path, "test")["primitive_interactions"] == 7
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() or torch.backends.mps.is_available()), reason="GPU regression")
+def test_diagnostics_accept_cpu_checkpoint_statistics_on_gpu(tmp_path):
+    from src.mylonas_ijepa_wm import curriculum_diagnostics as diagnostics
+    from src.mylonas_ijepa_wm.cost_adapter import ResidualTokenAdapter
+    from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+
+    class Encoder(torch.nn.Module):
+        def forward(self, images):
+            return torch.zeros(len(images), 1, 2, device=images.device)
+
+    class Model(torch.nn.Module):
+        def forward(self, latents, states, actions):
+            predicted = states + actions.reshape(*actions.shape[:-1], 5, 2).sum(dim=-2)
+            return predicted.unsqueeze(-2), predicted
+
+    class Environment:
+        def _render_at(self, position):
+            return np.zeros((224, 224, 3), np.uint8)
+
+        def reset(self, seed, **kwargs):
+            self.state = np.asarray(kwargs["start"], dtype=np.float32)
+            return SimpleNamespace(state=self.state.copy(), frame=self._render_at(None))
+
+        def step(self, action):
+            self.state += action
+            return SimpleNamespace(state=self.state.copy(), success=False)
+
+        def render(self):
+            return self._render_at(None)
+
+    planning = dict(PLANNING, planning_horizon=1, population=4, num_elites=2, cem_iterations=1, candidate_batch_size=2)
+    manifest = pilot_module().make_manifest(eval_per_band=1)
+    manifest["planning"] = planning
+    (tmp_path / "run_0").mkdir()
+    (tmp_path / "run_0/adapter.pt").write_bytes(b"audit-identity")
+    runtime = SimpleNamespace(
+        root=tmp_path, runtime_id="test", device=device, precision="fp32", env=Environment(),
+        encoder=Encoder().to(device), model=Model().to(device), manifest=manifest,
+        metadata=dict(state_mean=torch.zeros(2), state_std=torch.ones(2)),
+        goal_tokens=lambda: torch.zeros(1, 2, device=device),
+        encode_frames=lambda frames: torch.zeros(len(frames), 1, 2), load_world_model=lambda: None,
+    )
+    metric = ResidualTokenAdapter(2, 2).to(device).eval().requires_grad_(False)
+    report = diagnostics.run_diagnostics(runtime, metric, 0, sample_count=1)
+    assert report["extra_diagnostic_primitive_interactions"] == 60
+
+
+def test_adapted_videos_have_distinct_paths_for_shared_eval_cases(tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm import curriculum_runtime as runtime_module
+    from src.mylonas_ijepa_wm.cost_adapter import ResidualTokenAdapter
+
+    frame = np.zeros((224, 224, 3), np.uint8)
+    case = pilot_module().make_manifest(eval_per_band=1)["evaluation"][0]
+    args = SimpleNamespace(videos=True, run_seed=0)
+    runtime = SimpleNamespace(
+        root=tmp_path, runtime_id="test", device=torch.device("cpu"), precision="fp32", args=args,
+        manifest={"planning": {}}, config=None, encoder=None, model=None, metadata=None,
+        load_encoder=lambda: None, load_world_model=lambda: None, goal_tokens=lambda: torch.zeros(1, 2),
+        env=SimpleNamespace(reset=lambda *a, **kw: SimpleNamespace(state=np.array(kw["start"]), frame=frame, success=False)),
+    )
+
+    def episode(*positional, **kwargs):
+        positional[-1].append(frame)
+        return dict(success=True, micro_steps=1, primitive_actions=[[1., 0.]], macro_durations=[1])
+
+    monkeypatch.setattr(runtime_module.plan_proprio, "run_episode", episode)
+    monkeypatch.setattr(runtime_module.visual, "save_episode_video", lambda frames, directory, *rest: directory / "same-case.mp4")
+    metric = ResidualTokenAdapter(2, 2)
+    first = runtime_module.PilotRuntime.run_case(runtime, case, metric=metric)
+    args.run_seed = 1
+    second = runtime_module.PilotRuntime.run_case(runtime, case, metric=metric)
+    assert first["video_path"] != second["video_path"]

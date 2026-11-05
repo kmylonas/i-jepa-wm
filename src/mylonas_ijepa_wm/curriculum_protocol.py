@@ -142,6 +142,6 @@ def paired_report(raw, adapted):
             report[band][f"{label}_mean_final_distance"] = float(np.mean([records[key]["final_goal_distance"] for key in keys]))
             report[band][f"{label}_primitive_steps"] = sum(records[key]["micro_steps"] for key in keys)
     report["screen_passed"] = (report["far"]["success_change"] >= math.ceil(.2 * report["far"]["episodes"])
-                               and report["near"]["success_change"] >= -math.floor(.1 * report["near"]["episodes"]))
+                               and report["near"]["losses"] <= math.floor(.1 * report["near"]["episodes"]))
     report["interpretation"] = "Mechanism screen only; fixed-goal tasks reused across run seeds; not independent extra tasks or a full curriculum comparison."
     return report

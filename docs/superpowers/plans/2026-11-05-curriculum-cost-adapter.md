@@ -1,6 +1,6 @@
 # Curriculum Cost Adapter Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Deliver a reproducible, resumable near-to-far cost-adaptation pilot.
 
@@ -43,12 +43,12 @@ runner owns manifests, provenance, gates, collection, training and reporting.
 `plan_action(...,latent_cost_fn=None)`;
 `run_episode(...,initial=None,latent_cost_fn=None,observation_observer=None,plan_observer=None)`.
 
-- [ ] Write tests for bitwise identity MSE, gradients to adapter only, symmetric
+- [x] Write tests for bitwise identity MSE, gradients to adapter only, symmetric
   learned cost, changed CEM actions under a replacement scorer, deterministic
   valid fixed reset, primitive/partial-macro capture.
-- [ ] Run tests, confirm missing feature failures.
-- [ ] Implement the metric and backward-compatible optional hooks.
-- [ ] Run new tests and relevant existing planner/environment tests; commit.
+- [x] Run tests, confirm missing feature failures.
+- [x] Implement the metric and backward-compatible optional hooks.
+- [x] Run new tests and relevant existing planner/environment tests; commit.
 
 ### Task 2: Replay preparation and fixed-schedule fitting
 
@@ -59,10 +59,10 @@ runner owns manifests, provenance, gates, collection, training and reporting.
 consumes successful CPU token trajectories and returns adapter plus loss history
 and training metadata; `save/load` checkpoint uses safe torch data only.
 
-- [ ] Write and run failing tests for loop erasure, true elapsed times, empty
+- [x] Write and run failing tests for loop erasure, true elapsed times, empty
   data rejection, train/eval provenance exclusion, nonzero learning and restore.
-- [ ] Implement spec loss, bounded batches, seeding, and replay validation.
-- [ ] Verify tests with tiny latents, including decreasing rank inversions; commit.
+- [x] Implement spec loss, bounded batches, seeding, and replay validation.
+- [x] Verify tests with tiny latents, including decreasing rank inversions; commit.
 
 ### Task 3: Staged experiment runner and diagnostics
 
@@ -74,13 +74,13 @@ and training metadata; `save/load` checkpoint uses safe torch data only.
 Manifest stores train cases per seed and shared eval cases. Runtime identity
 is a digest of protocol, manifest, model/encoder/source hashes.
 
-- [ ] Write and run failing tests for disjoint cases, paired report alignment,
+- [x] Write and run failing tests for disjoint cases, paired report alignment,
   baseline gate, empty replay status, interrupted/resumed stages, changed
   provenance refusal, and a synthetic end-to-end pilot.
-- [ ] Implement resumable per-case artifacts, progress messages, hashes, gate,
+- [x] Implement resumable per-case artifacts, progress messages, hashes, gate,
   all-attempt accounting, training-only encoding, paired summaries and plots.
-- [ ] Implement cost maps and optional initial/elite simulator candidate audit.
-- [ ] Verify synthetic workflow and real DotWall resets; commit.
+- [x] Implement cost maps and optional initial/elite simulator candidate audit.
+- [x] Verify synthetic workflow and real DotWall resets; commit.
 
 ### Task 4: Colab workflow and delivery verification
 
@@ -90,9 +90,9 @@ is a digest of protocol, manifest, model/encoder/source hashes.
 **Interfaces:** Notebook launches the staged CLI from `curriculum-cost-adapter`,
 using Drive model paths; gate failure halts collection/training automatically.
 
-- [ ] Document all stages, budgets, thresholds, expected files, resumes and
+- [x] Document all stages, budgets, thresholds, expected files, resumes and
   interpretation; provide first-run and conditional replication cells.
-- [ ] Compile notebook code cells and smoke CLI help/prepare/report.
-- [ ] Run full pytest with PYTHONPATH=.:src; report unavailable optional deps.
-- [ ] Perform bounded local real-model plumbing smoke; fresh whole-branch
+- [x] Compile notebook code cells and smoke CLI help/prepare/report.
+- [x] Run full pytest with PYTHONPATH=.:src; report unavailable optional deps.
+- [x] Perform bounded local real-model plumbing smoke; fresh whole-branch
   review, fix important findings with regression tests, commit final changes.

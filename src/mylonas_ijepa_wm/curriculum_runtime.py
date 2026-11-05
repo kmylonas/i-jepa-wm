@@ -232,8 +232,9 @@ class PilotRuntime:
             record["raw_path"] = str(path)
         if video_frames:
             condition = "adapted" if metric is not None else cost
+            video_run = self.args.run_seed if metric is not None else case["run_seed"]
             record["video_path"] = str(visual.save_episode_video(
-                video_frames, self.root / "videos" / condition / str(case["run_seed"]),
+                video_frames, self.root / "videos" / condition / str(video_run),
                 int(case["case_id"].split("_")[-1]), case["seed"], record["success"], 10))
         return record
 

@@ -13,12 +13,12 @@ import torch
 from src.mylonas_ijepa_wm import plan_pointmaze as visual, plan_pointmaze_proprio as planner
 from src.mylonas_ijepa_wm.cost_adapter import adapter_goal_cost, token_goal_cost
 from src.mylonas_ijepa_wm.curriculum_protocol import load_stage, write_json
-from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256
+from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256, InteractionJournal, interaction_budget
 from src.mylonas_ijepa_wm.evaluate_wall_candidate_rankings import select_candidates
 from src.mylonas_ijepa_wm.validate_planning_costs_proprio import _spearman
 
 
-def replay_audit(runtime, case, candidates, metric=None):
+def replay_audit(runtime, case, candidates, metric=None, *, stage="diagnostics"):
     """Replay full horizons even after success, to match predicted terminal time."""
     goal = runtime.goal_tokens()
     frames, outcomes = [], []
@@ -27,10 +27,12 @@ def replay_audit(runtime, case, candidates, metric=None):
         runtime.env.reset(case["seed"], layout=case["layout"], start=case["start"], goal=case["goal"])
         reached_goal = False
         actions = np.asarray(candidate["actions"], dtype=np.float32)
-        for action in actions.reshape(-1, 2):
-            outcome = runtime.env.step(action)
-            reached_goal |= bool(outcome.success)
-            interactions += 1
+        with InteractionJournal(runtime.root, runtime.runtime_id, stage, case["case_id"]) as journal:
+            for step, action in enumerate(actions.reshape(-1, 2), start=1):
+                outcome = runtime.env.step(action)
+                journal.record(step, action)
+                reached_goal |= bool(outcome.success)
+                interactions += 1
         frames.append(runtime.env.render().copy())
         outcomes.append(dict(source=candidate["source"], predicted_cost=candidate["predicted_cost"],
                              actions=actions.tolist(), reached_goal=reached_goal,
@@ -99,7 +101,7 @@ def run_diagnostics(runtime, adapter, run_seed, sample_count):
             initial = runtime.env.reset(case["seed"], layout=case["layout"], start=case["start"], goal=case["goal"])
             latent = visual.encode_frame(runtime.encoder, initial.frame, runtime.device, runtime.precision)
             state = torch.tensor(initial.state, device=runtime.device)
-            state = (state - metadata["state_mean"]) / metadata["state_std"]
+            state = (state - metadata["state_mean"].to(runtime.device)) / metadata["state_std"].to(runtime.device)
             rounds = []
 
             def observe(iteration, actions, costs):
@@ -124,15 +126,21 @@ def run_diagnostics(runtime, adapter, run_seed, sample_count):
             )
             candidates = select_candidates(rounds, counts, counts, case["seed"])
             candidates.append(dict(source="returned_elite_mean", actions=result.action_sequence.detach().cpu().numpy(), predicted_cost=result.cost))
-            rows, interactions = replay_audit(runtime, case, candidates, metric)
+            rows, interactions = replay_audit(runtime, case, candidates, metric,
+                                              stage=f"run_{run_seed}/diagnostics/{label}/{case['case_id']}")
             saved = dict(**signature, primitive_interactions=interactions, rows=rows,
                          subsets={source: _ranking_summary([row for row in rows if row["source"] == source])
                                   for source in ("initial_random", "final_elite", "returned_elite_mean")})
             write_json(path, saved)
             audit_files.append(saved)
             print(f"audit {label}/{band}: {interactions} extra primitive interactions", flush=True)
+    budget = interaction_budget(runtime.root, runtime.runtime_id)
+    diagnostic_steps = sum(count for stage, count in budget["by_stage"].items()
+                           if stage.startswith(f"run_{run_seed}/diagnostics/"))
     result = dict(runtime_id=runtime.runtime_id, adapter_sha256=adapter_sha,
-                  extra_diagnostic_primitive_interactions=sum(item["primitive_interactions"] for item in audit_files),
+                  extra_diagnostic_primitive_interactions=diagnostic_steps,
+                  completed_audit_primitive_interactions=sum(item["primitive_interactions"] for item in audit_files),
+                  journal_count_is_lower_bound=budget["count_is_lower_bound"],
                   note="Separate from adaptation budget; full terminal horizons, no early success truncation.")
     write_json(root / "summary.json", result)
     return result
