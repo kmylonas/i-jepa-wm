@@ -164,3 +164,24 @@ def test_continued_fitting_rejects_wrong_shape_and_missing_replay_bands():
     with pytest.raises(ValueError, match="band"):
         replay.fit_adapter([episode()], torch.zeros(1, 4), seed=0, updates=1,
             balance_bands=True)
+
+
+def test_zero_anchor_optimizes_only_ranking_and_preserves_pair_sampling():
+    replay = replay_module()
+    data = []
+    for index, band in enumerate(('near', 'band_1')):
+        row = episode()
+        row.update(case_id=f'train_{index}', case={'band': band})
+        data.append(row)
+    goal = torch.zeros(1, 4)
+    adapter, result = replay.fit_adapter(data, goal, seed=3, updates=100,
+        batch_size=8, lr=.01, bottleneck=8, anchor_weight=0, balance_bands=True)
+    assert result['anchoring_enabled'] is False
+    assert all(row['loss'] == row['rank_loss'] and row['anchor_loss'] == 0 for row in result['history'])
+    assert result['history'][-1]['rank_loss'] < result['history'][0]['rank_loss']
+    costs = token_goal_cost(adapter, data[0]['latents'], goal).detach()
+    assert costs[0] > costs[-1]
+    _, anchored = replay.fit_adapter(data, goal, seed=3, updates=100,
+        batch_size=8, lr=.01, bottleneck=8, anchor_weight=1, balance_bands=True)
+    assert result['band_sample_counts'] == anchored['band_sample_counts']
+    assert result['episode_sample_counts'] == anchored['episode_sample_counts']

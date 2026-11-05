@@ -131,18 +131,25 @@ def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
             else:
                 episode, pairs, raw_costs = usable[int(rng.integers(len(usable)))]
             i, j = pairs[int(rng.integers(len(pairs)))]
+            # Reserve this draw even in the ablation so temporal pairs have
+            # the same RNG sequence as the anchored objective.
             anchor = int(rng.integers(len(episode["latents"])))
             early.append(episode["latents"][i])
             late.append(episode["latents"][j])
-            anchors.append(episode["latents"][anchor])
-            anchor_targets.append(float(raw_costs[anchor]))
+            if anchor_weight:
+                anchors.append(episode["latents"][anchor])
+                anchor_targets.append(float(raw_costs[anchor]))
         inputs = torch.stack(early + late + anchors).to(device=device, dtype=torch.float32)
         costs = token_goal_cost(adapter, inputs, target)
-        first, second, anchor_costs = costs.split(batch_size)
+        first, second = costs[:batch_size], costs[batch_size:2*batch_size]
         rank_loss = F.softplus(0.2 - (first - second) / scale).mean()
-        raw = torch.tensor(anchor_targets, device=device)
-        anchor_loss = ((anchor_costs - raw) / scale).square().mean()
-        loss = rank_loss + anchor_weight * anchor_loss
+        if anchor_weight:
+            raw = torch.tensor(anchor_targets, device=device)
+            anchor_loss = ((costs[2*batch_size:] - raw) / scale).square().mean()
+            loss = rank_loss + anchor_weight * anchor_loss
+        else:
+            anchor_loss = rank_loss.new_zeros(())
+            loss = rank_loss
         if not torch.isfinite(loss):
             raise ValueError("nonfinite adapter loss; refusing to save a trained adapter")
         optimizer.zero_grad(set_to_none=True)
@@ -159,6 +166,8 @@ def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
                   history=history, optimizer=optimizer.state_dict(), trajectories=summaries,
                   training_case_ids=[item[0]["case_id"] for item in usable],
                   loss="softplus(0.2-(early-late)/scale)+anchor_weight*normalized_anchor_mse")
+    if not anchor_weight:
+        result.update(anchoring_enabled=False, loss="softplus(0.2-(early-late)/scale)")
     if min_goal_progress is not None:
         result["pair_filter"] = dict(kind="oracle_goal_progress",
                                      min_goal_progress=float(min_goal_progress))
