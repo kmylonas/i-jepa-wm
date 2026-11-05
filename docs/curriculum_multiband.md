@@ -1,0 +1,103 @@
+# Sequential curricula with raw/adapted MSE maps
+
+Open `notebooks/curriculum_multiband_colab.ipynb` in GPU Colab and Run all.
+Use the same Drive artifacts from the pilot, clean-pair ablation and adjacent
+evaluation. Results are written to a sibling directory:
+`MyDrive/datasets/curriculum_cost_adapter/multiband_curriculum_v1`.
+
+The two curricula start from the original-pair and clean-pair checkpoints.
+They have independent experience buffers and checkpoint chains. Both keep x
+in [40,54], goal (50,42) and layout (32,30). They progress through y bands
+[22,30], [14,22], [8,14] beneath the original near band [30,36]. The final band
+ends at y=8 because the pinned environment's valid center coordinates start
+at 7.4. The grid stage checks these environment bounds before evaluation.
+
+## What happens in each band
+
+1. Evaluate the incoming frozen adapter on the band's 20 monitoring cases.
+2. Run 40 separate collection attempts with that adapter. Original and clean
+   policies use identical starts/seeds but collect their own outcomes.
+3. Add successful episodes to that branch's replay, including the original
+   successful near episodes and its own earlier successes. Save failures too,
+   but do not train from them. Evaluation/grid observations never enter replay.
+4. Copy the incoming adapter weights and start fresh Adam moments. Run 500
+   updates, batch size 16, learning rate 1e-4, anchor weight 1. Sample a usable
+   band uniformly, then an episode and eligible pair. This prevents a large
+   earlier buffer from overwhelming current experience.
+5. Freeze/save the new checkpoint and evaluate current plus earlier bands.
+6. Display raw MSE, adapted MSE and their difference on the shared grid.
+
+Original pairs use the existing revisit/time/separation filters. Clean pairs
+also require the later state to be >=0.5 units closer to the goal. Earlier
+examples are anchored to raw MSE as in the original fitting objective.
+Training copies, rather than edits, the incoming checkpoint. It never
+reinitializes the adapter or restores old optimizer moments.
+
+If current-band successes provide no usable pairs, that branch stops. Its
+actual failures and journal remain visible; the other branch continues. Poor
+evaluation does not change the schedule or secretly select another checkpoint.
+
+## Reading the results
+
+The success/actions matrices have adapter versions as rows and bands as
+columns. A version's next-band result is its performance before collecting
+there. Same-band and earlier-band results after fitting measure learning and
+forgetting. N/A means no completed evaluation, rather than zero successes.
+
+Each comparison prints paired wins and losses relative to raw and the incoming
+checkpoint, with case IDs. Offsetting wins do not conceal losses. The inherited
+18/20 reference competence and <=2-loss retention screens are annotations.
+Repeated cases across versions are monitoring tasks, not independent new
+samples or a significance test. At 20/20, inspect actions and final distance.
+
+One raw baseline covers all 80 cases. Each branch schedules 20 initial near
+evaluations, 60 incoming current-band evaluations, 120 collection attempts and
+180 current/earlier post-update evaluations. This is at most 840 episodes
+total without interruptions; stopped branches execute fewer. Actual primitive
+actions and interrupted attempts are journaled. Stage durations are printed.
+
+## Reading the heatmaps
+
+The grid contains 176 real rendered positions: x=40,42,...,54 and
+y=8,10,...,50. Full float32 tokens are encoded once and cached. All costs use
+the saved clean goal tokens, including raw planning. Heatmaps describe real
+image costs; they do not evaluate world-model terminal prediction quality.
+
+Raw and adapted MSE share fixed limits [0, maximum raw grid cost] for every
+checkpoint. The difference uses fixed symmetric limits around zero. A dark or
+bright region keeps the same numeric meaning across updates. Values above the
+display range are exposed through colorbar extensions, actual maxima and
+saturation counts. All unclipped values are saved in JSON. White points show
+training positions; the orange outline marks the most recently learned band;
+the star is the goal. Initial checkpoint maps precede the six learned maps.
+Rendering/encoding the grid executes zero primitive actions and never supplies
+training pairs, anchors or progression decisions.
+
+## Artifacts and resumption
+
+`manifest.json` fixes cases and fitting settings; `experiment.json` references
+the immutable source artifacts; `execution.json` binds common source/model and
+runtime settings. `cache/goal.*` and `cache/grid.*` hold shared diagnostic
+inputs. `raw/` holds the baseline runtime, cases and journal.
+
+Each `branches/original/` or `branches/clean/` has its own runtime, journal,
+raw collection episodes, successful replay, immutable `checkpoints/vN.pt`,
+fitting metadata under `updates/vN/`, evaluation records under `episodes/eval/`,
+and numeric/visual maps under `heatmaps/`. `report.json` and
+`curriculum_matrix.png` summarize both branches, including partial/stopped runs.
+The report also stores each monitoring case's path, outcome, final distance and
+actions. After reporting, `updates/vN/evaluation_paths.png` compares raw,
+incoming and updated trajectories on current and earlier bands. The collection
+paths and fitting losses appear in `updates/vN/training_and_experience.png`.
+
+Stages validate all cached cases in a stage before new actions. Source hashes,
+replay lineage, checkpoint/goal/grid identities and shared runtime settings
+are checked; output aliases and descendant symlinks are rejected. Completed
+updates are reused; an interrupted fit may restart its 500 updates from the
+incoming checkpoint. Interrupted simulator actions remain counted and only
+incomplete cases are retried. Use the notebook's pinned source revision to
+resume. A branch stopped for lack of usable experience remains stopped.
+
+Download the executed notebook and return it for interpretation. Local tests
+exercise the staged loop with synthetic episodes; live GPU outcomes remain
+pending until that execution.

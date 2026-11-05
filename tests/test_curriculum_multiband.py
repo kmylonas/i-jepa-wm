@@ -129,6 +129,7 @@ def prepared(curriculum_sources, tmp_path):
 
 def baseline(curriculum):
     runtime = TinyRuntime(curriculum, "raw")
+    curriculum.grid(runtime)
     curriculum.baseline(runtime)
     return runtime
 

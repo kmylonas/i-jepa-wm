@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from src.mylonas_ijepa_wm import curriculum_multiband_protocol as protocol
+from src.mylonas_ijepa_wm import curriculum_heatmaps as heatmaps
 from src.mylonas_ijepa_wm.curriculum_protocol import digest, write_json
 from src.mylonas_ijepa_wm.curriculum_replay import eligible_pairs, fit_adapter, load_adapter, save_adapter
 from src.mylonas_ijepa_wm.curriculum_runtime import (
@@ -24,6 +25,12 @@ def summarize(records):
                 mean_final_distance=float(np.mean([row["final_goal_distance"] for row in records])),
                 primitive_steps=sum(row["micro_steps"] for row in records),
                 failed_case_ids=[row["case_id"] for row in records if not row["success"]])
+
+
+def case_results(records):
+    return [dict(case=row["case"], case_id=row["case_id"], success=row["success"],
+                 final_goal_distance=row["final_goal_distance"], primitive_steps=row["micro_steps"],
+                 achieved_positions=row["achieved_positions"]) for row in records]
 
 
 def compare(before, after):
@@ -74,6 +81,31 @@ class Curriculum:
         return dict(recipe=recipe, version=version, checkpoint_sha256=sha, goal_sha256=self.goal_sha,
                     experiment_digest=digest(self.config))
 
+    def grid_signature(self):
+        return dict(experiment_digest=digest(self.config), goal_sha256=self.goal_sha,
+                    execution=protocol.read(self.root / "execution.json"),
+                    preprocessing="preprocess_frames/frozen_ijepa/224/v1")
+
+    def grid(self, runtime):
+        self.attach(runtime, "raw")
+        grid = heatmaps.prepare_grid(runtime, self.root, self.goal, self.grid_signature())
+        return dict(points=len(grid["points"]), grid_sha256=grid["sha256"],
+                    display_max=grid["display_max"], diagnostic_primitive_interactions=0)
+
+    def require_grid(self):
+        if not (self.root / "cache/grid.json").exists():
+            raise ValueError("run the fixed grid stage before curriculum branches")
+        return heatmaps.load_grid(self.root, self.grid_signature())
+
+    def heatmap(self, recipe, version, adapter, sha):
+        entries = self.replay_entries(recipe, version)
+        positions = []
+        for item in entries:
+            saved = torch.load(item["path"], map_location="cpu", weights_only=True)
+            positions.append(torch.as_tensor(saved["states"]).clone())
+        return heatmaps.checkpoint_heatmap(self.root, recipe, version, adapter, torch.cat(positions).numpy(),
+                                          self.grid_signature(), checkpoint_sha256=sha)
+
     def reference(self, recipe, version):
         if recipe not in protocol.RECIPES or version not in range(4):
             raise ValueError("invalid recipe or adapter version")
@@ -99,6 +131,7 @@ class Curriculum:
             if (inputs.get("recipe") != recipe or inputs.get("version") != version
                     or inputs.get("incoming_sha256") != incoming_sha
                     or inputs.get("goal_sha256") != self.goal_sha
+                    or inputs.get("grid_sha256") != protocol.read(self.root / "cache/grid.json")["sha256"]
                     or inputs.get("fitting") != self.manifest["fitting"]
                     or inputs.get("seed") != 20261106 + version
                     or inputs.get("pair_margin") != self.config["pair_rules"][recipe]
@@ -144,9 +177,12 @@ class Curriculum:
 
     def initial(self, recipe, runtime):
         self.attach(runtime, recipe)
+        self.require_grid()
         self.require_raw()
         adapter, _, sha = self.checkpoint(recipe, 0, runtime.device)
-        return summarize(self.evaluate(recipe, 0, "near", runtime, adapter, sha))
+        result = summarize(self.evaluate(recipe, 0, "near", runtime, adapter, sha))
+        self.heatmap(recipe, 0, adapter, sha)
+        return result
 
     def collection_rows(self, recipe, index):
         root = protocol.runtime_root(self.root, recipe)
@@ -221,12 +257,18 @@ class Curriculum:
         if index not in range(1, 4):
             raise ValueError("curriculum band index must be 1, 2 or 3")
         root = self.attach(runtime, recipe)
+        grid = self.require_grid()
+        grid_sha = grid["sha256"]
+        del grid
         self.require_raw()
         if (root / "stopped.json").exists():
             return protocol.read(root / "stopped.json")
         self.rows(recipe, 0, "near")
         if index > 1:
             self.checkpoint(recipe, index-1)
+            completion = protocol.read(root / f"updates/v{index-1}/band_complete.json")
+            if completion.get("checkpoint_sha256") != self.reference(recipe, index-1)[1]:
+                raise ValueError("previous band evaluation/diagnostics are incomplete")
             for previous_band in protocol.BANDS[:index]:
                 self.rows(recipe, index-1, previous_band)
         adapter, _, incoming_sha = self.checkpoint(recipe, index-1, runtime.device)
@@ -260,6 +302,7 @@ class Curriculum:
                 self.ensure_replay(runtime, recipe, record)
         entries = self.replay_entries(recipe, index)
         inputs = dict(recipe=recipe, version=index, incoming_sha256=incoming_sha, goal_sha256=self.goal_sha,
+                      grid_sha256=grid_sha,
                       fitting=self.manifest["fitting"], seed=20261106+index,
                       pair_margin=self.config["pair_rules"][recipe], replay=entries)
         if done:
@@ -273,6 +316,7 @@ class Curriculum:
             new_pairs = sum(len(eligible_pairs(row["states"], row["primitive_steps"], goal=row["case"]["goal"],
                 min_goal_progress=inputs["pair_margin"])[1]) for row in replay if row["case"]["band"] == band)
             if not new_pairs:
+                heatmaps.plot_update(self.root, recipe, index, {"history": []}, collection)
                 return self.stopped(recipe, index, "no usable current-band pairs from successful collection")
             write_json(status_path, dict(status="training", inputs=inputs))
             try:
@@ -298,8 +342,12 @@ class Curriculum:
                           old_episodes=sum(row["band"] != band for row in entries),
                           new_episodes=sum(row["band"] == band for row in entries))
             write_json(status_path, status)
+            del replay
         for key in protocol.BANDS[:index+1]:
             self.evaluate(recipe, index, key, runtime, updated, updated_sha)
+        self.heatmap(recipe, index, updated, updated_sha)
+        heatmaps.plot_update(self.root, recipe, index,
+            protocol.read(root / f"updates/v{index}/training.json"), collection)
         write_json(root / f"updates/v{index}/band_complete.json", {"checkpoint_sha256": updated_sha, "status": "complete"})
         return status
 
@@ -313,9 +361,10 @@ class Curriculum:
         total = 0
         for recipe in protocol.RECIPES:
             root = protocol.runtime_root(self.root, recipe)
-            versions, comparisons, updates = {}, {}, {}
+            versions, comparisons, updates, collections, per_case = {}, {}, {}, {}, {}
             for version in range(4):
                 versions[str(version)], comparisons[str(version)] = {}, {}
+                per_case[str(version)] = {}
                 exists = (root / "runtime.json").exists() and (version == 0 or
                     (root / f"updates/v{version}/status.json").exists() and
                     protocol.read(root / f"updates/v{version}/status.json").get("status") == "complete")
@@ -324,6 +373,7 @@ class Curriculum:
                 for band in protocol.BANDS:
                     rows = self.rows(recipe, version, band, optional=True) if exists else None
                     versions[str(version)][band] = summarize(rows) if rows is not None else None
+                    per_case[str(version)][band] = case_results(rows) if rows is not None else None
                     if rows is not None:
                         block = {"vs_raw": compare(raw[band], rows) if raw[band] is not None else None}
                         earlier = self.rows(recipe, version-1, band, optional=True) if version else None
@@ -332,6 +382,15 @@ class Curriculum:
                 if version and (root / f"updates/v{version}/status.json").exists():
                     updates[str(version)] = protocol.read(root / f"updates/v{version}/status.json")
             rid = protocol.check_runtime(self.root, recipe, self.config, self.manifest) if (root / "runtime.json").exists() else None
+            for index, band in enumerate(protocol.BANDS[1:], 1):
+                stage_path = root / "stages" / f"collect/{band}.json"
+                if rid and stage_path.exists():
+                    sha = self.reference(recipe, index-1)[1]
+                    records = protocol.optional_stage(root, f"collect/{band}", self.manifest["collection"][band], rid,
+                        self.identity(recipe, index-1, sha), capture=True)
+                    collections[band] = summarize(records) if records is not None else None
+                else:
+                    collections[band] = None
             budget = interaction_budget(root, rid) if rid else {"primitive_interactions": 0, "interrupted_attempts": 0}
             total += budget["primitive_interactions"]
             state = "not_started" if all(row is None for rows in versions.values() for row in rows.values()) else "active"
@@ -339,24 +398,28 @@ class Curriculum:
                 state = "stopped"
             elif (root / "updates/v3/band_complete.json").exists():
                 state = "complete"
-            branches[recipe] = dict(status=state, versions=versions, comparisons=comparisons, updates=updates, budget=budget,
+            branches[recipe] = dict(status=state, versions=versions, comparisons=comparisons, updates=updates,
+                collections=collections, budget=budget, per_case=per_case,
                 stopped=protocol.read(root / "stopped.json") if state == "stopped" else None)
         raw_root = protocol.runtime_root(self.root, "raw")
         raw_rid = protocol.check_runtime(self.root, "raw", self.config, self.manifest) if (raw_root / "runtime.json").exists() else None
         raw_budget = interaction_budget(raw_root, raw_rid) if raw_rid else {"primitive_interactions": 0}
         result = dict(schema_version=1, experiment=self.config, bounds=self.manifest["bounds"],
                       raw={key: summarize(rows) if rows is not None else None for key, rows in raw.items()},
+                      raw_per_case={key: case_results(rows) if rows is not None else None for key, rows in raw.items()},
                       raw_budget=raw_budget, branches=branches,
                       total_primitive_interactions=total+raw_budget["primitive_interactions"],
                       diagnostic_primitive_interactions=0,
                       note="Repeated monitoring cases; operational screens are not significance claims. Each branch learns from its own policy's successes.")
         write_json(self.root / "report.json", result)
+        if render:
+            heatmaps.plot_curriculum_report(self.root, self.manifest, result)
         return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=["prepare", "baseline", "initial", "band", "report"])
+    parser.add_argument("stage", choices=["prepare", "baseline", "grid", "initial", "band", "report"])
     for name in ("parent-dir", "clean-dir", "adjacent-dir", "output-dir"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--recipe", choices=protocol.RECIPES)
@@ -380,7 +443,7 @@ def main(argv=None):
         else:
             if any(getattr(args, name) is None for name in ("world_model_checkpoint", "encoder_checkpoint", "dino_wm_root")):
                 raise ValueError("frozen model, encoder and pinned DINO paths are required")
-            recipe = "raw" if args.stage == "baseline" else args.recipe
+            recipe = "raw" if args.stage in ("baseline", "grid") else args.recipe
             if recipe is None or args.stage == "band" and args.band_index is None:
                 raise ValueError("recipe and band index are required for branch stages")
             args.output_dir = protocol.runtime_root(curriculum.root, recipe)
@@ -389,13 +452,29 @@ def main(argv=None):
             try:
                 if args.stage == "baseline":
                     result = curriculum.baseline(runtime)
+                elif args.stage == "grid":
+                    result = curriculum.grid(runtime)
                 elif args.stage == "initial":
                     result = curriculum.initial(recipe, runtime)
                 else:
                     result = curriculum.band(recipe, args.band_index, runtime)
             finally:
                 runtime.close()
-    print(json.dumps(result, indent=2))
+    if args.stage == "prepare":
+        console = dict(prepared=str(args.output_dir), evaluation_cases=80, collection_attempts_per_band=40,
+                       maximum_scheduled_episodes=840, bands=protocol.BOUNDS)
+    elif args.stage == "band":
+        console = {key: value for key, value in result.items() if key != "inputs"}
+        if "inputs" in result:
+            console.update(recipe=result["inputs"]["recipe"], version=result["inputs"]["version"],
+                           replay_episodes=len(result["inputs"]["replay"]))
+    elif args.stage == "report":
+        console = dict(raw=result["raw"], total_primitive_interactions=result["total_primitive_interactions"],
+            branches={key: {field: row[field] for field in ("status", "versions", "collections", "budget", "stopped")}
+                      for key, row in result["branches"].items()}, report=str(curriculum.root / "report.json"))
+    else:
+        console = result
+    print(json.dumps(console, indent=2))
     return result
 
 
