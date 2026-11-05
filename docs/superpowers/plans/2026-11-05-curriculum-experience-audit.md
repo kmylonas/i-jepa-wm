@@ -54,5 +54,5 @@ derived arrays plus a few explicitly selected raw-image episode paths.
   representative plots, implement explanatory notebook and report text.
 - [x] Compile notebook cells, smoke the CLI, run the full project suite, and
   request one fresh whole-change review; fix important findings with regression tests.
-- [ ] Commit and push to the existing feature branch; provide direct Colab link
+- [x] Commit and push to the existing feature branch; provide direct Colab link
   and exact cells to run, explicitly distinguishing readiness from actual data findings.
