@@ -9,7 +9,8 @@ import torch.nn.functional as F
 from src.mylonas_ijepa_wm.cost_adapter import ResidualTokenAdapter, token_goal_cost
 
 
-def eligible_pairs(states, steps, *, loop_radius=0.5, min_gap=2, min_separation=2.0):
+def eligible_pairs(states, steps, *, loop_radius=0.5, min_gap=2, min_separation=2.0,
+                   goal=None, min_goal_progress=None):
     """Erase revisits, then retain separated temporal comparisons (not shortest paths)."""
     states = torch.as_tensor(states, device="cpu", dtype=torch.float32)
     steps = torch.as_tensor(steps, device="cpu")
@@ -27,11 +28,24 @@ def eligible_pairs(states, steps, *, loop_radius=0.5, min_gap=2, min_separation=
     pairs = [(i, j) for offset, i in enumerate(retained) for j in retained[offset + 1:]
              if steps[j] - steps[i] >= min_gap
              and torch.linalg.vector_norm(states[i] - states[j]) >= min_separation]
+    if min_goal_progress is not None:
+        if (not np.isfinite(min_goal_progress) or min_goal_progress <= 0):
+            raise ValueError("minimum goal progress must be finite and positive")
+        try:
+            goal = torch.as_tensor(goal, device="cpu", dtype=torch.float32)
+        except (TypeError, ValueError):
+            raise ValueError("oracle pair filtering requires a finite 2D goal") from None
+        if goal.shape != (2,) or not torch.isfinite(goal).all():
+            raise ValueError("oracle pair filtering requires a finite 2D goal")
+        distances = torch.linalg.vector_norm(states - goal, dim=1)
+        pairs = [(i, j) for i, j in pairs
+                 if float(distances[i] - distances[j]) >= min_goal_progress]
     return retained, pairs
 
 
 def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
-                bottleneck=64, anchor_weight=1.0, device="cpu", progress=None):
+                bottleneck=64, anchor_weight=1.0, device="cpu", progress=None,
+                min_goal_progress=None):
     """Fit on training successes only; evaluation data is never a selection set."""
     if (updates < 1 or batch_size < 1 or not np.isfinite(lr) or lr <= 0
             or not np.isfinite(anchor_weight) or anchor_weight < 0):
@@ -50,9 +64,22 @@ def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
             raise ValueError("replay tokens must be finite and match goal")
         if len(episode["states"]) != len(tokens):
             raise ValueError("replay frames, states and primitive steps must align")
-        retained, pairs = eligible_pairs(episode["states"], episode["primitive_steps"])
-        summaries.append(dict(case_id=episode["case_id"], frames=len(tokens),
-                              retained=len(retained), eligible_pairs=len(pairs)))
+        retained, temporal_pairs = eligible_pairs(episode["states"], episode["primitive_steps"])
+        if min_goal_progress is None:
+            pairs = temporal_pairs
+            summary = dict(case_id=episode["case_id"], frames=len(tokens),
+                           retained=len(retained), eligible_pairs=len(pairs))
+        else:
+            case = episode.get("case")
+            if not isinstance(case, dict) or "goal" not in case:
+                raise ValueError("oracle pair filtering requires each episode case goal")
+            _, pairs = eligible_pairs(
+                episode["states"], episode["primitive_steps"], goal=case["goal"],
+                min_goal_progress=min_goal_progress,
+            )
+            summary = dict(case_id=episode["case_id"], frames=len(tokens), retained=len(retained),
+                           temporal_pairs=len(temporal_pairs), eligible_pairs=len(pairs))
+        summaries.append(summary)
         costs = torch.cat([(chunk.float() - goal).square().mean(dim=(1, 2))
                            for chunk in tokens.split(16)])
         all_costs.append(costs)
@@ -108,6 +135,9 @@ def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
                   history=history, optimizer=optimizer.state_dict(), trajectories=summaries,
                   training_case_ids=[item[0]["case_id"] for item in usable],
                   loss="softplus(0.2-(early-late)/scale)+anchor_weight*normalized_anchor_mse")
+    if min_goal_progress is not None:
+        result["pair_filter"] = dict(kind="oracle_goal_progress",
+                                     min_goal_progress=float(min_goal_progress))
     return adapter, result
 
 
