@@ -1,6 +1,7 @@
 """Successful real-trajectory replay and fixed-schedule metric fitting."""
 
 from pathlib import Path
+from copy import deepcopy
 
 import numpy as np
 import torch
@@ -45,7 +46,7 @@ def eligible_pairs(states, steps, *, loop_radius=0.5, min_gap=2, min_separation=
 
 def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
                 bottleneck=64, anchor_weight=1.0, device="cpu", progress=None,
-                min_goal_progress=None):
+                min_goal_progress=None, initial_adapter=None, balance_bands=False):
     """Fit on training successes only; evaluation data is never a selection set."""
     if (updates < 1 or batch_size < 1 or not np.isfinite(lr) or lr <= 0
             or not np.isfinite(anchor_weight) or anchor_weight < 0):
@@ -96,16 +97,39 @@ def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
     scale = float(positive.median())
     rng = np.random.default_rng(seed)
     device = torch.device(device)
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        adapter = ResidualTokenAdapter(goal.shape[-1], bottleneck).to(device)
+    if initial_adapter is None:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            adapter = ResidualTokenAdapter(goal.shape[-1], bottleneck).to(device)
+    else:
+        if (not isinstance(initial_adapter, ResidualTokenAdapter)
+                or initial_adapter.dim != goal.shape[-1] or initial_adapter.bottleneck != bottleneck):
+            raise ValueError("initial adapter dimensions differ from fitting configuration")
+        adapter = deepcopy(initial_adapter).to(device).requires_grad_(True).train()
+    groups, band_sample_counts, episode_sample_counts = {}, {}, {}
+    if balance_bands:
+        for item in usable:
+            band = item[0].get("case", {}).get("band")
+            if not isinstance(band, str) or not band:
+                raise ValueError("balanced replay requires a band on each usable episode")
+            groups.setdefault(band, []).append(item)
+        band_names = list(groups)
+        band_sample_counts = dict.fromkeys(band_names, 0)
+        episode_sample_counts = {item[0]["case_id"]: 0 for item in usable}
     optimizer = torch.optim.Adam(adapter.parameters(), lr=lr)
     target = goal.to(device)
     history = []
     for update in range(updates):
         early, late, anchors, anchor_targets = [], [], [], []
         for _ in range(batch_size):
-            episode, pairs, raw_costs = usable[int(rng.integers(len(usable)))]
+            if balance_bands:
+                band = band_names[int(rng.integers(len(band_names)))]
+                pool = groups[band]
+                episode, pairs, raw_costs = pool[int(rng.integers(len(pool)))]
+                band_sample_counts[band] += 1
+                episode_sample_counts[episode["case_id"]] += 1
+            else:
+                episode, pairs, raw_costs = usable[int(rng.integers(len(usable)))]
             i, j = pairs[int(rng.integers(len(pairs)))]
             anchor = int(rng.integers(len(episode["latents"])))
             early.append(episode["latents"][i])
@@ -138,6 +162,12 @@ def fit_adapter(episodes, goal, *, seed, updates=500, batch_size=16, lr=1e-4,
     if min_goal_progress is not None:
         result["pair_filter"] = dict(kind="oracle_goal_progress",
                                      min_goal_progress=float(min_goal_progress))
+    if initial_adapter is not None or balance_bands:
+        result.update(warm_start=initial_adapter is not None, optimizer_reset=True)
+    if balance_bands:
+        result.update(sampling="uniform_band_then_episode_then_pair",
+                      band_episode_counts={band: len(pool) for band, pool in groups.items()},
+                      band_sample_counts=band_sample_counts, episode_sample_counts=episode_sample_counts)
     return adapter, result
 
 

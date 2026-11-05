@@ -167,7 +167,7 @@ interactions for fitting. A stopped branch must not block the other's results.
 Persist goal/grid tokens and numeric heatmaps for later audit. Display progress
 and each stage's elapsed time. Pin the notebook source revision before delivery.
 
-## Proposed implementation choices awaiting design review
+## Approved implementation choices
 
 The user fixed downward tiling, x range, both independent curricula, repeated
 experience-driven updates and heatmaps. The exact bottom endpoint, collection
@@ -176,4 +176,5 @@ progression are the concrete proposed defaults above. Architecture, world model,
 encoder and training loss are inherited; no separate architecture experiment.
 
 A fresh builder review found nothing important left to resolve before planning.
-The design is ready for user approval; implementation has not started.
+The user approved this complete design on 2026-11-05. Implement in the existing
+worktree using the established inline workflow, followed by fresh final review.

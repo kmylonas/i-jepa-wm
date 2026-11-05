@@ -119,3 +119,48 @@ def test_clean_fitting_records_pairs_before_and_after_oracle_filter():
         "case_id": "train_0", "frames": 3, "retained": 3,
         "temporal_pairs": 2, "eligible_pairs": 1,
     }]
+
+
+def test_warm_start_copies_frozen_adapter_and_uses_fresh_optimizer():
+    from src.mylonas_ijepa_wm.cost_adapter import ResidualTokenAdapter
+    replay = replay_module()
+    initial = ResidualTokenAdapter(4, 3).eval().requires_grad_(False)
+    with torch.no_grad():
+        for parameter in initial.parameters():
+            parameter.fill_(.1)
+    before = {key: value.clone() for key, value in initial.state_dict().items()}
+    fitted, result = replay.fit_adapter([episode()], torch.zeros(1, 4), seed=0, updates=1,
+        batch_size=2, bottleneck=3, lr=1e-30, initial_adapter=initial)
+    assert all(torch.equal(fitted.state_dict()[key], value) for key, value in before.items())
+    assert all(torch.equal(initial.state_dict()[key], value) for key, value in before.items())
+    assert all(not parameter.requires_grad for parameter in initial.parameters())
+    assert all(parameter.requires_grad for parameter in fitted.parameters())
+    assert result["warm_start"] and result["optimizer_reset"]
+
+
+def test_balanced_replay_samples_bands_instead_of_episode_population():
+    replay = replay_module()
+    data = []
+    for i in range(11):
+        row = episode()
+        row["case_id"] = f"train_{i}"
+        row["case"] = {"band": "near" if i == 0 else "band_1"}
+        data.append(row)
+    _, result = replay.fit_adapter(data, torch.zeros(1, 4), seed=9, updates=100,
+        batch_size=4, bottleneck=3, balance_bands=True)
+    assert 160 <= result["band_sample_counts"]["near"] <= 240
+    assert sum(result["band_sample_counts"].values()) == 400
+    assert sum(result["episode_sample_counts"].values()) == 400
+    assert result["band_episode_counts"] == {"near": 1, "band_1": 10}
+    assert result["sampling"] == "uniform_band_then_episode_then_pair"
+
+
+def test_continued_fitting_rejects_wrong_shape_and_missing_replay_bands():
+    from src.mylonas_ijepa_wm.cost_adapter import ResidualTokenAdapter
+    replay = replay_module()
+    with pytest.raises(ValueError, match="dimension"):
+        replay.fit_adapter([episode()], torch.zeros(1, 4), seed=0, updates=1,
+            bottleneck=3, initial_adapter=ResidualTokenAdapter(5, 3))
+    with pytest.raises(ValueError, match="band"):
+        replay.fit_adapter([episode()], torch.zeros(1, 4), seed=0, updates=1,
+            balance_bands=True)
