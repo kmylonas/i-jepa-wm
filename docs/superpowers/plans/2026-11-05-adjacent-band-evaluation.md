@@ -41,10 +41,10 @@ run_stage in distinct condition directories. Provide a standalone Colab.
 - Produces prepare_evaluation(parent, clean, output), evaluate_condition(parent, clean, output, condition, runtime), make_report(parent, clean, output, render=True).
 - CLI stages prepare/evaluate/report; evaluate selects raw/original/clean. Source validation uses existing clean-ablation provenance checks and loads frozen adapters with their training runtime IDs.
 
-- [ ] Write synthetic tests for deterministic 20-case geometry, immutable/idempotent prepare, path aliases, changed source rejection, all three condition records and paired reporting, checkpoint provenance, interrupted journal/resume and mixed cases.
-- [ ] Run pytest -q tests/test_curriculum_adjacent_band.py; expect failure because the runner is absent.
-- [ ] Implement the runner, shared saved goal and source/runtime validation; add report and trajectory figures.
-- [ ] Build Colab with original Drive sources, child adjacent_band_v1 and raw/original/clean evaluation, then display report and figures.
-- [ ] Verify focused tests, notebook compilation, synthetic CLI prepare/report, figure inspection and full pytest suite.
-- [ ] Commit implementation, request one fresh final review, and fix important findings with regression tests.
-- [ ] Push existing curriculum-cost-adapter branch and give direct Colab link; state live results remain pending.
+- [x] Write synthetic tests for deterministic 20-case geometry, immutable/idempotent prepare, path aliases, changed source rejection, all three condition records and paired reporting, checkpoint provenance, interrupted journal/resume and mixed cases.
+- [x] Run pytest -q tests/test_curriculum_adjacent_band.py; expect failure because the runner is absent.
+- [x] Implement the runner, shared saved goal and source/runtime validation; add report and trajectory figures.
+- [x] Build Colab with original Drive sources, child adjacent_band_v1 and raw/original/clean evaluation, then display report and figures.
+- [x] Verify focused tests, notebook compilation, synthetic CLI prepare/report, figure inspection and full pytest suite.
+- [x] Commit implementation, request one fresh final review, and fix important findings with regression tests.
+- [x] Push existing curriculum-cost-adapter branch and give direct Colab link; state live results remain pending.
