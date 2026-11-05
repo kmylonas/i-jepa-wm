@@ -122,3 +122,19 @@ code cells compile. Its runtime is pinned to
 These checks do not measure live GPU outcomes, full-size replay memory or
 Colab/Drive reliability. Failures there can interrupt the run, and successful
 execution still may not improve planning. No minor findings were deferred.
+
+## Inspecting saturated maps and vertical profiles
+
+Open `notebooks/curriculum_cost_profiles_colab.ipynb` on a CPU runtime and Run
+all. This standalone viewer reads the existing `heatmaps/vN.json` files from
+both branches, checks their completed-map hashes and shared grid/raw costs,
+and plots every available version. Its common color ceiling covers the
+largest saved raw or adapted cost, so high values remain distinguishable.
+
+The vertical profiles fix x at 40, 46, 50 and 54 and plot cost against y from
+8 to goal y=42. Read left to right: rising sections assign a higher cost to
+positions closer to the goal; falling sections assign a lower cost. Samples
+are joined without estimating unmeasured grid points. Real-image profiles do
+not establish the ordering of world-model predictions or feasible actions.
+PNG/PDF figures are saved in `diagnostics/cost_profiles`; no simulation,
+training, checkpoint loading or changes to existing artifacts are needed.
