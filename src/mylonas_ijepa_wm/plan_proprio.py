@@ -63,8 +63,9 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def run_episode(adapter, config, encoder, model, metadata, args, device, precision, seed, frames):
-    initial = adapter.reset(seed)
+def run_episode(adapter, config, encoder, model, metadata, args, device, precision, seed, frames,
+                *, initial=None, latent_cost_fn=None, observation_observer=None, plan_observer=None):
+    initial = adapter.reset(seed) if initial is None else initial
     state_mean = metadata["state_mean"].to(device=device, dtype=torch.float32)
     state_std = metadata["state_std"].to(device=device, dtype=torch.float32)
     num_hist = model.num_hist
@@ -92,6 +93,10 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
     terminated = truncated = False
     final_cost = None
     micro_steps = 0
+    primitive_actions, macro_durations = [], []
+    mpc_updates = 0
+    if observation_observer is not None:
+        observation_observer(0, initial, None)
     rng = visual._create_generator(device, seed)
     while len(actions) < args.max_macro_steps and not (success or terminated or truncated):
         plan = planner.plan_action(
@@ -110,12 +115,20 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
             max_action_length=getattr(args, "max_action_length", None),
             micro_action_dim=config.micro_action_dim,
             cem_selection=getattr(args, "cem_selection", None),
+            **({"latent_cost_fn": latent_cost_fn} if latent_cost_fn is not None else {}),
         )
+        mpc_updates += 1
+        if plan_observer is not None:
+            plan_observer(micro_steps, plan, latent_history, state_history, action_history)
         for macro in plan.action_sequence[:min(args.actions_per_plan, args.max_macro_steps - len(actions))]:
             macro = macro.detach().cpu().numpy().astype(np.float32)
+            macro_start = micro_steps
             for micro in macro.reshape(config.actions_per_model_step, config.micro_action_dim):
                 outcome = adapter.step(micro)
                 micro_steps += 1
+                primitive_actions.append(micro.tolist())
+                if observation_observer is not None:
+                    observation_observer(micro_steps, outcome, micro.copy())
                 if frames is not None:
                     frames.append(adapter.render_video())
                 success = outcome.success
@@ -134,6 +147,7 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
                     action_history[1:], torch.as_tensor(macro, device=device).unsqueeze(0)
                 ], dim=0)
             actions.append(macro.tolist())
+            macro_durations.append(micro_steps - macro_start)
             positions.append(outcome.state[:2].tolist())
             states.append(outcome.state.tolist())
             final_cost = plan.cost
@@ -145,6 +159,8 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
         "success": bool(success), "terminated": bool(terminated),
         "truncated": bool(truncated), "macro_steps": len(actions),
         "micro_steps": micro_steps,
+        "primitive_actions": primitive_actions, "macro_durations": macro_durations,
+        "mpc_updates": mpc_updates,
         "initial_goal_distance": initial_distance,
         "final_goal_distance": float(np.linalg.norm(states[-1][:2] - adapter.goal)),
         "final_planner_cost": final_cost,

@@ -158,6 +158,7 @@ def plan_action(
     micro_action_dim=2,
     candidate_observer=None,
     cem_selection=None,
+    latent_cost_fn=None,
 ):
     if cost not in {"latent", "position"}:
         raise ValueError(f"unknown cost mode: {cost}")
@@ -196,7 +197,8 @@ def plan_action(
                 precision=precision,
             )
             if cost == "latent":
-                costs.append(compute_terminal_cost(
+                costs.append(latent_cost_fn(predicted_visual[:, -1].float())
+                             if latent_cost_fn is not None else compute_terminal_cost(
                     predicted_latents=predicted_visual,
                     target_latent=target_latent,
                     mode="latent",

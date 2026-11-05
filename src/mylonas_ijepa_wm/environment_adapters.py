@@ -133,7 +133,7 @@ class WallAdapter:
         )[0].permute(1, 2, 0).cpu().numpy()
         return _frame(image)
 
-    def reset(self, seed, layout=None):
+    def reset(self, seed, layout=None, start=None, goal=None):
         random.seed(seed)
         layouts = self.config.wall_layouts or [[
             self.config.wall_location, self.config.door_location
@@ -146,11 +146,23 @@ class WallAdapter:
             raise ValueError(f"Invalid Wall layout: {self.layout}")
         self._make_environment(*self.layout, seed)
         self.env.seed(seed)
-        start, goal = self.env.generate_random_state(seed)
+        sampled_start, sampled_goal = self.env.generate_random_state(seed)
+        start = sampled_start if start is None else start
+        goal = sampled_goal if goal is None else goal
+        for position in (start, goal):
+            point = np.asarray(position, dtype=np.float32)
+            lower = self.env.border_padding
+            upper = self.env.img_size - 1 - lower
+            if (point.shape != (2,) or not np.isfinite(point).all()
+                    or (point < lower).any() or (point > upper).any()
+                    or (self.layout[0] - 3 <= point[0] <= self.layout[0] + 3
+                        and abs(point[1] - self.layout[1]) >= 4)):
+                raise ValueError(f"Invalid Wall position: {position}")
         self.env.set_init_state(np.asarray(start, dtype=np.float32))
         _, state = self.env.reset()
         self.goal = np.asarray(goal, dtype=np.float32)
-        return StepResult(state.detach().cpu().numpy().astype(np.float32), self.render(), False)
+        success = np.linalg.norm(np.asarray(start) - self.goal) < self.config.wall_success_threshold
+        return StepResult(state.detach().cpu().numpy().astype(np.float32), self.render(), bool(success))
 
     def state(self):
         return self.env.dot_position.detach().cpu().numpy().astype(np.float32).copy()

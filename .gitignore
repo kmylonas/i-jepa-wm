@@ -16,6 +16,7 @@ tests/*
 # Generated results
 ijepa_cache/
 .worktrees/
+.superpowers/
 src/mylonas_ijepa_wm/position_probe_runs/
 *.npy
 
@@ -55,3 +56,6 @@ src/mylonas_ijepa_wm/wall
 !tests/test_ijepa_wall_checkpoint_init.py
 !tests/test_ijepa_wall_train.py
 !tests/test_mylonas_ijepa_wall_ijepa_export.py
+!tests/test_curriculum_cost_adapter.py
+!tests/test_curriculum_replay.py
+!tests/test_curriculum_cost_pilot.py
