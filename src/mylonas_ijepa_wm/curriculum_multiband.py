@@ -10,6 +10,7 @@ import torch
 
 from src.mylonas_ijepa_wm import curriculum_multiband_protocol as protocol
 from src.mylonas_ijepa_wm import curriculum_heatmaps as heatmaps
+from src.mylonas_ijepa_wm import curriculum_initial_fit as initial_fit
 from src.mylonas_ijepa_wm.curriculum_protocol import digest, write_json
 from src.mylonas_ijepa_wm.curriculum_replay import eligible_pairs, fit_adapter, load_adapter, save_adapter
 from src.mylonas_ijepa_wm.curriculum_runtime import (
@@ -112,6 +113,8 @@ class Curriculum:
         if recipe not in protocol.RECIPES or version not in range(4):
             raise ValueError("invalid recipe or adapter version")
         if version == 0:
+            if initial_fit.enabled(self):
+                return initial_fit.reference(self, recipe)
             source = self.config["sources"][recipe]
             return Path(source["directory"]) / "run_0/adapter.pt", source["adapter_sha256"], source["runtime_id"]
         root = protocol.runtime_root(self.root, recipe)
@@ -125,6 +128,8 @@ class Curriculum:
     def checkpoint(self, recipe, version, device="cpu"):
         path, sha, rid = self.reference(recipe, version)
         adapter, saved = load_adapter(path, device, expected_runtime_id=rid)
+        if version == 0 and initial_fit.enabled(self):
+            initial_fit.validate_loaded(self, recipe, saved)
         if version:
             root = protocol.runtime_root(self.root, recipe)
             status = protocol.read(root / f"updates/v{version}/status.json")
@@ -181,6 +186,13 @@ class Curriculum:
         self.attach(runtime, recipe)
         self.require_grid()
         self.require_raw()
+        root = protocol.runtime_root(self.root, recipe)
+        if (root / 'stopped.json').exists():
+            return protocol.read(root / 'stopped.json')
+        if initial_fit.enabled(self):
+            stopped = initial_fit.ensure(self, recipe, runtime)
+            if stopped is not None:
+                return stopped
         adapter, _, sha = self.checkpoint(recipe, 0, runtime.device)
         result = summarize(self.evaluate(recipe, 0, "near", runtime, adapter, sha))
         self.heatmap(recipe, 0, adapter, sha)
@@ -359,7 +371,9 @@ class Curriculum:
         for version in range(4):
             versions[str(version)], comparisons[str(version)] = {}, {}
             per_case[str(version)] = {}
-            exists = (root / "runtime.json").exists() and (version == 0 or
+            initial_ready = not initial_fit.enabled(self) or initial_fit.completed(root)
+            exists = (root / "runtime.json").exists() and ((version == 0 and initial_ready) or
+                version > 0 and
                 (root / f"updates/v{version}/status.json").exists() and
                 protocol.read(root / f"updates/v{version}/status.json").get("status") == "complete")
             if exists:
@@ -453,6 +467,7 @@ def main(argv=None):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--recipe", choices=protocol.RECIPES)
     parser.add_argument("--band-index", type=int, choices=[1, 2, 3])
+    parser.add_argument('--without-anchor', action='store_true', help='prepare: retrain v0 from identity and disable anchoring in all fits')
     for name in ("world-model-checkpoint", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--expected-world-model-sha256", default=EXPECTED_WM)
@@ -463,8 +478,10 @@ def main(argv=None):
     parser.set_defaults(run_seed=0, videos=False)
     args = parser.parse_args(argv)
     paths = (args.parent_dir, args.clean_dir, args.adjacent_dir, args.output_dir)
+    if args.without_anchor and args.stage != 'prepare':
+        raise ValueError('--without-anchor is a prepare option; later stages use the saved configuration')
     if args.stage == "prepare":
-        result = prepare(*paths)
+        result = prepare(*paths, without_anchor=args.without_anchor)
     else:
         curriculum = Curriculum(*paths)
         if args.stage == "report":

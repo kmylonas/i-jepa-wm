@@ -354,3 +354,106 @@ def test_corrupt_existing_grid_rejected_before_report_or_actions(curriculum_sour
     with pytest.raises(ValueError, match="grid"):
         curriculum.report() if operation == "report" else curriculum.baseline(runtime)
     assert len(runtime.visited) == before
+
+
+def no_anchor_prepared(curriculum_sources, tmp_path):
+    mod = module()
+    output = tmp_path / 'multiband_no_anchor_v1'
+    mod.prepare(*curriculum_sources, output, without_anchor=True)
+    return mod.Curriculum(*curriculum_sources, output)
+
+
+def test_no_anchor_variant_keeps_cases_and_rejects_configuration_reuse(curriculum_sources, tmp_path):
+    before = [file_hashes(path) for path in curriculum_sources]
+    anchored = prepared(curriculum_sources, tmp_path)
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    assert free.manifest['fitting']['anchor_weight'] == 0
+    assert anchored.manifest['fitting']['anchor_weight'] == 1
+    assert free.manifest['evaluation'] == anchored.manifest['evaluation']
+    assert free.manifest['collection'] == anchored.manifest['collection']
+    assert free.config['ablation'] == 'ranking_only_from_identity'
+    with pytest.raises(ValueError, match='configuration'):
+        module().prepare(*curriculum_sources, free.root)
+    assert [file_hashes(path) for path in curriculum_sources] == before
+
+
+def test_no_anchor_initial_fit_matches_identity_fit_and_resumes_without_refitting(curriculum_sources, tmp_path, monkeypatch):
+    from src.mylonas_ijepa_wm.curriculum_replay import fit_adapter, load_adapter
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    baseline(free)
+    runtime = TinyRuntime(free, 'original')
+    free.initial('original', runtime)
+    path, sha, rid = free.reference('original', 0)
+    assert path == runtime.root / 'checkpoints/v0.pt'
+    assert rid == runtime.runtime_id
+    actual, saved = load_adapter(path, 'cpu')
+    replay = free.load_replay('original', 0, free.replay_entries('original', 0))
+    expected, _ = fit_adapter(replay, free.goal, seed=0, **free.manifest['fitting'])
+    assert all(torch.equal(actual.state_dict()[key], value) for key, value in expected.state_dict().items())
+    assert saved['training']['initialization'] == 'identity'
+    assert saved['training']['anchor_weight'] == 0
+    assert saved['training']['anchoring_enabled'] is False
+    helper = importlib.import_module('src.mylonas_ijepa_wm.curriculum_initial_fit')
+    def cannot_refit(*args, **kwargs):
+        raise AssertionError('completed initial fit must not repeat')
+    monkeypatch.setattr(helper, 'fit_adapter', cannot_refit)
+    visits = len(runtime.visited)
+    free.initial('original', runtime)
+    assert len(runtime.visited) == visits
+    assert file_sha256(path) == sha
+
+
+def test_both_no_anchor_curricula_retrain_initial_and_chain_all_updates(curriculum_sources, tmp_path):
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    before = [file_hashes(path) for path in curriculum_sources]
+    baseline(free)
+    for recipe in ('original', 'clean'):
+        runtime = TinyRuntime(free, recipe)
+        free.initial(recipe, runtime)
+        previous = free.reference(recipe, 0)[1]
+        for index in (1, 2, 3):
+            status = free.band(recipe, index, runtime)
+            assert status['inputs']['incoming_sha256'] == previous
+            training = json.loads((runtime.root / f'updates/v{index}/training.json').read_text())
+            assert training['warm_start'] and training['optimizer_reset']
+            assert training['anchor_weight'] == 0 and training['anchoring_enabled'] is False
+            assert all(row['loss'] == row['rank_loss'] and row['anchor_loss'] == 0 for row in training['history'])
+            if recipe == 'clean':
+                assert training['pair_filter']['min_goal_progress'] == .5
+            previous = status['checkpoint_sha256']
+    report = free.report()
+    assert report['branches']['original']['status'] == report['branches']['clean']['status'] == 'complete'
+    assert report['total_primitive_interactions'] == 3360
+    assert [file_hashes(path) for path in curriculum_sources] == before
+
+
+@pytest.mark.parametrize('artifact', ['checkpoints/v0.pt', 'updates/v0/training.json', 'inputs'])
+def test_no_anchor_initial_corruption_blocks_new_actions(curriculum_sources, tmp_path, artifact):
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    baseline(free)
+    runtime = TinyRuntime(free, 'clean')
+    free.initial('clean', runtime)
+    if artifact == 'inputs':
+        path = runtime.root / 'updates/v0/status.json'
+        status = json.loads(path.read_text()); status['inputs']['seed'] += 1
+        write_json(path, status)
+    else:
+        path = runtime.root / artifact
+        path.write_bytes(path.read_bytes() + b'changed')
+    before = len(runtime.visited)
+    with pytest.raises(ValueError, match='initial|hash|provenance'):
+        free.band('clean', 1, runtime)
+    assert len(runtime.visited) == before
+
+
+def test_partial_no_anchor_initial_fit_is_not_reported_as_evaluated(curriculum_sources, tmp_path):
+    free = no_anchor_prepared(curriculum_sources, tmp_path)
+    baseline(free)
+    runtime = TinyRuntime(free, 'original')
+    free.attach(runtime, 'original')
+    write_json(runtime.root / 'updates/v0/status.json', {'status': 'training', 'inputs': {}})
+    report = free.report()
+    assert report['branches']['original']['versions']['0']['near'] is None
+    with pytest.raises(ValueError, match='initial|inputs'):
+        free.initial('original', runtime)
+    assert not runtime.visited

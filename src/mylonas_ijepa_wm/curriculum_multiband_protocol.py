@@ -15,6 +15,7 @@ from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256, interaction_bud
 RECIPES = ("original", "clean")
 BANDS = ("near", "band_1", "band_2", "band_3")
 BOUNDS = {"near": [30., 36.], "band_1": [22., 30.], "band_2": [14., 22.], "band_3": [8., 14.]}
+NO_ANCHOR = "ranking_only_from_identity"
 
 
 def read(path):
@@ -87,13 +88,22 @@ def make_manifest(parent, adjacent_manifest):
                 bounds=deepcopy(BOUNDS), x_range=[40, 54], recipes=list(RECIPES))
 
 
-def prepare(parent, clean, adjacent_dir, output):
-    parent, clean, adjacent_dir, output = safe_paths(parent, clean, adjacent_dir, output)
-    sources, parent_manifest, adjacent_manifest = source_snapshot(parent, clean, adjacent_dir)
-    manifest = make_manifest(parent_manifest, adjacent_manifest)
+def configuration(sources, manifest, *, without_anchor=False):
+    if without_anchor:
+        manifest["fitting"]["anchor_weight"] = 0.0
     config = dict(schema_version=1, sources=sources, manifest_digest=digest(manifest),
                   pair_rules=dict(original=None, clean=.5), optimizer="fresh_adam_per_band",
                   sampling="uniform_band_then_episode_then_pair", goal_source="clean/run_0/goal_tokens.pt")
+    if without_anchor:
+        config["ablation"] = NO_ANCHOR
+    return config
+
+
+def prepare(parent, clean, adjacent_dir, output, *, without_anchor=False):
+    parent, clean, adjacent_dir, output = safe_paths(parent, clean, adjacent_dir, output)
+    sources, parent_manifest, adjacent_manifest = source_snapshot(parent, clean, adjacent_dir)
+    manifest = make_manifest(parent_manifest, adjacent_manifest)
+    config = configuration(sources, manifest, without_anchor=without_anchor)
     for name, value in (("manifest.json", manifest), ("experiment.json", config)):
         path = output / name
         if path.exists() and read(path) != value:
@@ -127,10 +137,9 @@ def load(parent, clean, adjacent_dir, output):
     parent, clean, adjacent_dir, output = safe_paths(parent, clean, adjacent_dir, output)
     config, manifest = read(output / "experiment.json"), read(output / "manifest.json")
     sources, pm, am = source_snapshot(parent, clean, adjacent_dir)
-    expected = dict(schema_version=1, sources=sources, manifest_digest=digest(make_manifest(pm, am)),
-                    pair_rules=dict(original=None, clean=.5), optimizer="fresh_adam_per_band",
-                    sampling="uniform_band_then_episode_then_pair", goal_source="clean/run_0/goal_tokens.pt")
-    if config != expected or manifest != make_manifest(pm, am):
+    expected_manifest = make_manifest(pm, am)
+    expected = configuration(sources, expected_manifest, without_anchor=config.get("ablation") == NO_ANCHOR)
+    if config != expected or manifest != expected_manifest:
         raise ValueError("curriculum source/configuration changed after prepare")
     load_goal(output, config)
     return config, manifest
