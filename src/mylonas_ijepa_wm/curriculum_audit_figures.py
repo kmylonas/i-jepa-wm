@@ -29,7 +29,7 @@ def _world(ax, goal):
 
 def _fraction(row, label):
     value = row[label]["episode_uniform"]
-    return [value[key + "_fraction"] or 0 for key in ("progress", "ambiguous", "contradictory")]
+    return [value[key + "_fraction"] for key in ("progress", "ambiguous", "contradictory")]
 
 
 def _ranked_examples(rows):
@@ -92,20 +92,24 @@ def render_audit(root, rows, report, output):
     fig.tight_layout(rect=(0, 0, 1, .97))
     _save(fig, output / "progress.png")
 
-    before, after = _fraction(report["pair_quality"], "before"), _fraction(report["pair_quality"], "after")
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    labels = ["useful: later closer", "unclear within tolerance", "wrong: later farther"]
-    colors = ["#16a34a", "#94a3b8", "#dc2626"]
-    bottom = np.zeros(2)
-    for i, label in enumerate(labels):
-        values = [before[i], after[i]]
-        ax.bar([0, 1], values, bottom=bottom, color=colors[i], label=label)
-        bottom += values
-    ax.set_xticks([0, 1], ["before revisit filter", "pairs actually used"])
-    ax.set_ylim(0, 1); ax.set_ylabel("fraction under trainer sampling")
-    ax.legend(loc="upper center", bbox_to_anchor=(.5, -.14), ncol=3)
-    ax.set_title("Does temporal order give a correct closer-to-goal label?")
-    _save(fig, output / "pair_quality.png")
+    if report["pair_quality"]["after"]["usable_successful_episodes"] == 0:
+        _placeholder(output / "pair_quality.png", "Does temporal order give a correct closer-to-goal label?",
+                     "No successful episode had an eligible pair after the revisit and separation filters.")
+    else:
+        before, after = _fraction(report["pair_quality"], "before"), _fraction(report["pair_quality"], "after")
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        labels = ["useful: later closer", "unclear within tolerance", "wrong: later farther"]
+        colors = ["#16a34a", "#94a3b8", "#dc2626"]
+        bottom = np.zeros(2)
+        for i, label in enumerate(labels):
+            values = [before[i], after[i]]
+            ax.bar([0, 1], values, bottom=bottom, color=colors[i], label=label)
+            bottom += values
+        ax.set_xticks([0, 1], ["before revisit filter", "pairs actually used"])
+        ax.set_ylim(0, 1); ax.set_ylabel("fraction under trainer sampling")
+        ax.legend(loc="upper center", bbox_to_anchor=(.5, -.14), ncol=3)
+        ax.set_title("Does temporal order give a correct closer-to-goal label?")
+        _save(fig, output / "pair_quality.png")
 
     fig, ax = plt.subplots(figsize=(7, 7)); _world(ax, goal)
     for row in rows:

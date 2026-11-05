@@ -38,8 +38,9 @@ def _pair_stats(pairs, distances, tolerance):
     result = dict(count=len(pairs), progress=int((progress > tolerance).sum()),
                   ambiguous=int((np.abs(progress) <= tolerance).sum()),
                   contradictory=int((progress < -tolerance).sum()),
+                  strict_progress=int((progress > 0).sum()),
                   strict_contradictory=int((progress < 0).sum()))
-    for key in ("progress", "ambiguous", "contradictory", "strict_contradictory"):
+    for key in ("progress", "ambiguous", "contradictory", "strict_progress", "strict_contradictory"):
         result[key + "_fraction"] = _fraction(result[key], len(pairs))
     return result
 
@@ -81,6 +82,7 @@ def analyze_episode(raw, *, success_radius=4.5, progress_tolerance=.25):
                closer_actions=int((progress > progress_tolerance).sum()),
                away_actions=int((progress < -progress_tolerance).sum()),
                neutral_actions=int((np.abs(progress) <= progress_tolerance).sum()),
+               strict_closer_actions=int((progress > 0).sum()),
                strict_away_actions=int((progress < 0).sum()),
                cumulative_distance_increase=float(np.maximum(-progress, 0).sum()),
                maximum_excursion_beyond_start=float(max(distances.max() - distances[0], 0)),
@@ -91,7 +93,8 @@ def analyze_episode(raw, *, success_radius=4.5, progress_tolerance=.25):
                retained_frames=len(retained), pairs_before=_pair_stats(unfiltered, distances, progress_tolerance),
                pairs_after=_pair_stats(pairs, distances, progress_tolerance))
     for name, count in (("closer", "closer_actions"), ("away", "away_actions"),
-                        ("neutral", "neutral_actions"), ("stationary", "stationary_actions")):
+                        ("neutral", "neutral_actions"), ("strict_closer", "strict_closer_actions"),
+                        ("strict_away", "strict_away_actions"), ("stationary", "stationary_actions")):
         row[name + "_fraction"] = _fraction(row[count], n)
     row["contradictory_examples"] = [dict(indices=[i, j], primitive_steps=[int(steps[i]), int(steps[j])],
                                            distances=[float(distances[i]), float(distances[j])],
@@ -106,7 +109,7 @@ def summarize_pair_quality(rows, field):
     usable = [row[field] for row in rows if row["success"] and row[field]["count"]]
     total = sum(item["count"] for item in usable)
     result = dict(usable_successful_episodes=len(usable), total_pairs=total, episode_uniform={}, pooled_pairs={})
-    for key in ("progress", "ambiguous", "contradictory"):
+    for key in ("progress", "ambiguous", "contradictory", "strict_progress", "strict_contradictory"):
         result["episode_uniform"][key + "_fraction"] = float(np.mean([item[key] / item["count"] for item in usable])) if usable else None
         result["pooled_pairs"][key + "_fraction"] = _fraction(sum(item[key] for item in usable), total)
     return result
@@ -126,11 +129,17 @@ def _load_collection(root, manifest, runtime_id, seed, tolerance):
         count = int(record["micro_steps"])
         frames = raw["frames"]
         durations = raw["macro_durations"]
+        recorded_actions = np.asarray(record.get("primitive_actions"), dtype=np.float64)
         if (len(raw["states"]) != count + 1 or len(frames) != count + 1
                 or frames.ndim != 4 or frames.shape[-1] != 3 or frames.dtype != torch.uint8
                 or sum(durations) != count or any(not 1 <= duration <= 5 for duration in durations)
                 or not np.allclose(np.asarray(raw["states"])[0], record["case"]["start"], atol=1e-4, rtol=0)):
             raise ValueError(f"raw frame/state/action duration alignment mismatch: {path.name}")
+        if durations != record.get("macro_durations") or len(durations) != record.get("macro_steps"):
+            raise ValueError(f"raw and recorded macro durations differ: {path.name}")
+        raw_actions = np.asarray(raw["primitive_actions"], dtype=np.float64)
+        if recorded_actions.shape != raw_actions.shape or not np.allclose(recorded_actions, raw_actions, atol=1e-6, rtol=0):
+            raise ValueError(f"raw and recorded primitive actions differ: {path.name}")
         row = analyze_episode(raw, progress_tolerance=tolerance)
         row.update(raw_path=record["raw_path"], mpc_updates=record["mpc_updates"])
         rows.append(row)
@@ -254,7 +263,7 @@ def run_audit(pilot_dir, run_seed=0, progress_tolerance=.25, *, render=True):
                   mean_actions=float(np.mean([row["steps"] for row in rows])),
                   median_actions=float(np.median([row["steps"] for row in rows])),
                   motion={key + "_fraction": _fraction(sum(row[key + "_actions"] for row in rows), count)
-                          for key in ("closer", "away", "neutral", "strict_away", "stationary")},
+                          for key in ("closer", "away", "neutral", "strict_closer", "strict_away", "stationary")},
                   mean_success_path_efficiency=float(np.mean([row["success_path_efficiency"] for row in rows if row["success_path_efficiency"] is not None]))
                   if any(row["success_path_efficiency"] is not None for row in rows) else None,
                   pair_quality=dict(before=summarize_pair_quality(rows, "pairs_before"), after=summarize_pair_quality(rows, "pairs_after")),

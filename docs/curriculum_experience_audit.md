@@ -30,7 +30,7 @@ Run `notebooks/curriculum_experience_audit_colab.ipynb` in a CPU Colab runtime.
 It reads `MyDrive/datasets/curriculum_cost_adapter/pilot_v1` and writes derived
 files under `experience_audit/run_0`. Existing pilot files remain unchanged.
 
-The report includes the two evaluation cases that changed from success before
+The report includes every evaluation case that changed from success before
 adaptation to failure after adaptation when complete evaluation records exist.
 Those paths contain observations only at replanning boundaries, with their
 actual primitive timestamps. Exact learned-cost ordering is not recomputed:

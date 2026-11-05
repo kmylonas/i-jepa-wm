@@ -32,11 +32,15 @@ def test_progress_path_efficiency_and_reversals_distinguish_wandering():
     assert straight["path_length"] == 10
     assert straight["success_path_efficiency"] == pytest.approx(.9)
     assert straight["away_fraction"] == 0
+    assert straight["strict_closer_fraction"] == 1
+    assert straight["strict_away_fraction"] == 0
     assert straight["action_reversal_fraction"] == 0
     wandering = audit.analyze_episode(raw_episode([0, 2, 1, 4, 10]), success_radius=1)
     assert wandering["path_length"] == 12
     assert wandering["success_path_efficiency"] == pytest.approx(.75)
     assert wandering["away_fraction"] == .25
+    assert wandering["strict_closer_actions"] == 3
+    assert wandering["strict_away_actions"] == 1
     assert wandering["cumulative_distance_increase"] == 1
     assert wandering["action_reversal_fraction"] == pytest.approx(2 / 3)
     assert wandering["mean_action_change"] == pytest.approx(5 / 3)
@@ -49,6 +53,8 @@ def test_pair_filter_can_retain_geometrically_wrong_temporal_labels():
     assert row["pairs_after"]["count"] == 8
     assert row["pairs_after"]["contradictory"] == 1
     assert row["pairs_after"]["contradictory_fraction"] == .125
+    assert row["pairs_after"]["strict_progress"] == 7
+    assert row["pairs_after"]["strict_contradictory"] == 1
     assert row["contradictory_examples"][0]["indices"] == [1, 3]
     assert row["contradictory_examples"][0]["distance_increase"] == 2
 
@@ -63,9 +69,12 @@ def test_pair_filter_erases_revisits_without_renumbering_time():
 
 def test_pair_summary_matches_episode_uniform_training_sampler():
     audit = audit_module()
-    rows = [dict(success=True, pairs_after=dict(count=2, progress=1, ambiguous=0, contradictory=1)),
-            dict(success=True, pairs_after=dict(count=100, progress=100, ambiguous=0, contradictory=0)),
-            dict(success=False, pairs_after=dict(count=2, progress=0, ambiguous=0, contradictory=2))]
+    rows = [dict(success=True, pairs_after=dict(count=2, progress=1, ambiguous=0, contradictory=1,
+                                                strict_progress=1, strict_contradictory=1)),
+            dict(success=True, pairs_after=dict(count=100, progress=100, ambiguous=0, contradictory=0,
+                                                strict_progress=100, strict_contradictory=0)),
+            dict(success=False, pairs_after=dict(count=2, progress=0, ambiguous=0, contradictory=2,
+                                                 strict_progress=0, strict_contradictory=2))]
     summary = audit.summarize_pair_quality(rows, "pairs_after")
     assert summary["usable_successful_episodes"] == 2
     assert summary["episode_uniform"]["contradictory_fraction"] == .25
@@ -106,7 +115,8 @@ def saved_pilot(tmp_path):
                         primitive_steps=torch.arange(6), primitive_actions=torch.tensor(np.diff(states, axis=0) / 2),
                         frames=torch.zeros(6, 224, 224, 3, dtype=torch.uint8), macro_durations=[5]), tmp_path / path)
         return dict(success=True, micro_steps=5, raw_path=path, macro_durations=[5],
-                    macro_steps=1, mpc_updates=1, achieved_positions=states[[0, -1]].tolist())
+                    primitive_actions=(np.diff(states, axis=0) / 2).tolist(), macro_steps=1,
+                    mpc_updates=1, achieved_positions=states[[0, -1]].tolist())
 
     run_stage(tmp_path, "run_0/collect", cases, "fixture", collect)
     (tmp_path / "run_0").mkdir()
@@ -145,6 +155,17 @@ def test_mixed_raw_provenance_and_changed_filter_counts_are_rejected(saved_pilot
     with pytest.raises(ValueError, match="provenance"):
         audit.run_audit(saved_pilot, render=False)
     raw["runtime_id"] = "fixture"
+    torch.save(raw, path)
+    raw["macro_durations"] = [2, 3]
+    torch.save(raw, path)
+    with pytest.raises(ValueError, match="duration"):
+        audit.run_audit(saved_pilot, render=False)
+    raw["macro_durations"] = [5]
+    raw["primitive_actions"][0, 0] += 1
+    torch.save(raw, path)
+    with pytest.raises(ValueError, match="action"):
+        audit.run_audit(saved_pilot, render=False)
+    raw["primitive_actions"][0, 0] -= 1
     torch.save(raw, path)
     training_path = saved_pilot / "run_0/training.json"
     training = json.loads(training_path.read_text())
