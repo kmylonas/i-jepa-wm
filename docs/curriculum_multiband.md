@@ -161,3 +161,13 @@ pixel equality cannot prove historical pixel equality, and current arithmetic
 differences alone cannot establish the previous runtime's settings. The
 executed notebook and `report.json` should be inspected before replacing a
 target or changing the experiment. Source hashes are rechecked after probing.
+
+Diagnostic verification: the full suite passes 400 tests (plus 16 subtests).
+Regression tests cover mismatched target copies, batch-dependent encoding,
+render-route differences, a difference isolated to the goal's batch slot,
+and arithmetic restoration for all three precision modes on normal and
+exception exits. A local smoke run used the real pinned renderer and a small
+encoder to verify report/tensor/figure output with unchanged source hashes.
+The real Drive goal/grid tensors and CUDA results remain to be inspected.
+The diagnostic notebook pins runtime revision
+`7367ee2b92be83e85e49ca696c4051cdce6ecec5`.
