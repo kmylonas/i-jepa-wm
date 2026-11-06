@@ -143,3 +143,29 @@ def test_radial_interpolation_has_comparisons_between_two_unfitted_positions(pre
     # Between fitted radii2 and6, retain multiple unseen interior radii so
     # comparisons of two genuinely unfitted observations have a denominator.
     assert report['generalization']['trained_direction']['inside']['raw']['heldout_comparisons']>0
+
+
+@pytest.mark.parametrize('alias', ['stages', 'figures', 'cache_file', 'dangling'])
+def test_descendant_symlinks_rejected_before_fit_without_external_writes(prepared_radial,monkeypatch,alias):
+    mod,out,cache,*_=prepared_radial
+    external=out.parent/'unrelated'
+    external.mkdir()
+    (external/'sentinel.txt').write_text('another experiment')
+    if alias=='cache_file':
+        link=next((cache/'shards').glob('*.pt'))
+        target=external/'original.pt'
+        target.write_bytes(link.read_bytes())
+        link.unlink()
+    else:
+        link=out/'stages' if alias=='stages' else out/'stages/s1/figures'
+        link.parent.mkdir(parents=True,exist_ok=True)
+        target=external/'missing' if alias=='dangling' else external
+    link.symlink_to(target,target_is_directory=alias!='cache_file')
+    before={str(p.relative_to(external)):p.read_bytes() for p in external.rglob('*') if p.is_file()}
+    def forbidden(*args,**kwargs):raise AssertionError('unsafe alias reached fitting')
+    monkeypatch.setattr(mod,'fit',forbidden)
+    try:
+        with pytest.raises(ValueError,match='symlink|alias'):
+            mod.stage(out,cache,1)
+    finally:
+        assert before=={str(p.relative_to(external)):p.read_bytes() for p in external.rglob('*') if p.is_file()}

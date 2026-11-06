@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,12 @@ def locations(output,cache,sources=()):
     for source in map(lambda p:Path(p).resolve(),sources):
         if any(p==source or source in p.parents or p in source.parents for p in (output,cache)):
             raise ValueError('output/cache must not overlap encoder or renderer source')
+    # Check directories, files and dangling links without following aliases.
+    # This runs before loading inputs or fitting, including completed-stage reuse.
+    for root in (output,cache):
+        for parent,dirs,files in os.walk(root,followlinks=False):
+            if any((Path(parent)/name).is_symlink() for name in dirs+files):
+                raise ValueError('radial output/cache must not contain descendant symlinks or aliases')
     return output,cache
 
 
