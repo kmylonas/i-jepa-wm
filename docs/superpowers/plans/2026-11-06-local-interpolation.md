@@ -29,24 +29,24 @@ and plotting notebook. Extend new grids while preserving legacy cache loading.
 **Files:** new curriculum_local_geometry.py; tests/test_curriculum_local_geometry.py.
 **Interfaces:** sampled_pairs(episodes,training), select_pairs(...), profiles(...), curve_metrics(...), coverage(...).
 
-- [ ] Add behavioral tests for actual fit sampler parity, segment monotonicity/bounds, conservative coverage and flat/reversed/ridged curve metrics.
-- [ ] Run focused tests RED (missing module); implement pure helpers, retaining RNG draw order and no cost-conditioned selection.
-- [ ] Run focused tests GREEN and commit.
+- [x] Add behavioral tests for actual fit sampler parity, segment monotonicity/bounds, conservative coverage and flat/reversed/ridged curve metrics.
+- [x] Run focused tests RED (missing module); implement pure helpers, retaining RNG draw order and no cost-conditioned selection.
+- [x] Run focused tests GREEN and commit.
 
 ### Task 2: Read-only audit and full-right maps
 
 **Files:** new curriculum_local_audit.py, curriculum_local_plots.py; modify curriculum_heatmaps.py; tests/test_curriculum_heatmaps.py and local geometry tests.
 **Interfaces:** audit(curriculum, output, env, encode, ...), CLI constructs only WallAdapter/frozen encoder; plotting consumes report.json and probes.json.
 
-- [ ] Add failing full-right/legacy cache tests and synthetic end-to-end audit tests checking immutable source hashes, source alias rejection, actual fresh scores, exposure and expanded domain.
-- [ ] Implement dynamic grid shapes and explicit new-grid geometry metadata, legacy loading; implement streaming audit with checkpoint validation and replay/fresh endpoint comparison.
-- [ ] Run focused tests GREEN; execute plot export on synthetic numeric results; commit.
+- [x] Add failing full-right/legacy cache tests and synthetic end-to-end audit tests checking immutable source hashes, source alias rejection, actual fresh scores, exposure and expanded domain.
+- [x] Implement dynamic grid shapes and explicit new-grid geometry metadata, legacy loading; implement streaming audit with checkpoint validation and replay/fresh endpoint comparison.
+- [x] Run focused tests GREEN; execute plot export on synthetic numeric results; commit.
 
 ### Task 3: GPU Colab and publication
 
 **Files:** notebooks/curriculum_local_interpolation_colab.ipynb, docs/curriculum_local_interpolation.md.
 **Interfaces:** pinned clone/renderer/encoder setup -> diagnostic CLI -> numeric summaries and PNG/PDF displays.
 
-- [ ] Build standalone notebook using existing setup with timestamped separate output; compile all code cells and execute diagnostic/plot cells on synthetic fixtures.
-- [ ] Run full suite; commit; one fresh whole-change review; fix Important findings with RED→GREEN tests and suite.
-- [ ] Pin verified code, push existing branch, verify remote HEAD and clean worktree. Report actual GPU execution pending.
+- [x] Build standalone notebook using existing setup with timestamped separate output; compile all code cells and execute diagnostic/plot cells on synthetic fixtures.
+- [x] Run full suite; commit; one fresh whole-change review; fix Important findings with RED→GREEN tests and suite.
+- [x] Pin verified code, push existing branch, verify remote HEAD and clean worktree. Report actual GPU execution pending.

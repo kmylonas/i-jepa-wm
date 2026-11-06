@@ -57,3 +57,5 @@ local display were substituted for that workflow. The actual pinned renderer
 also rendered x=59.999 and neighboring coordinates successfully. All six
 notebook code cells compile. Real GPU encoding, Colab setup and empirical
 results remain pending user execution.
+
+Notebook runtime pin: `479ec97e2a4c8876e9619d8c0709619e759a7f4a`.
