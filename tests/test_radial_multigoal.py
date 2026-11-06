@@ -17,20 +17,21 @@ def module(name='radial_multigoal'):
 
 def test_split_excludes_reserved_coordinates_images_and_identical_training_images():
     import json
-    # Node4 aliases withheld goal3; nodes1/5 share pixels; node6 exceeds pair range.
-    points=[[50,42],[50,40],[48,38],[50,18],[50,18.1],[50,39.9],[50,8],[51,20]]
-    hashes=['a','b','c','goal','goal','b','f','query']
-    split=module().make_split(points,[0,1,2,3,4,5,6],[0,3],hashes)
-    assert split['train_ids']==[0,1,2,6]
+    # Node4 aliases goal3; nodes1/5 share pixels; pair6/8 exceeds range.
+    points=[[50,42],[50,40],[48,38],[50,18],[50,18.1],[50,39.9],[50,8],[51,20],[50,55]]
+    hashes=['a','b','c','goal','goal','b','f','query','h']
+    split=module().make_split(points,[0,1,2,3,4,5,6,8],[0,3],hashes)
+    assert split['train_ids']==[0,1,2,6,8]
     assert split['removed_candidate_ids']==[3,4,5]
-    assert split['heldout_mask']==[False]*7+[True]
+    assert split['heldout_mask']==[False]*7+[True,False]
     single=split['single_pairs'];multi=split['multi_pairs']
-    assert {tuple(p) for p in single}=={(1,0),(2,0),(6,0)}
+    assert {tuple(p) for p in single}=={(1,0),(2,0),(6,0),(8,0)}
     assert len({tuple(p) for p in multi})==len(multi)
     for a,b in multi:
         assert a<b and a in split['train_ids'] and b in split['train_ids']
         assert 0<np.linalg.norm(np.subtract(points[a],points[b]))<=34+1e-5
     assert (0,6) in map(tuple,multi)
+    assert (6,8) not in map(tuple,multi)
     assert json.loads(json.dumps(split))==split
 
 
@@ -43,7 +44,7 @@ def test_pair_costs_use_both_endpoints_and_target_linear_distance():
     values=mod.pair_costs(adapter,tokens,pairs)
     assert torch.allclose(values,torch.tensor([.5,1.]))
     values.sum().backward()
-    assert torch.isfinite(adapter.weight.grad).all() and adapter.weight.grad.abs().sum()>0
+    assert torch.allclose(adapter.weight.grad,torch.tensor([[2.,1.],[1.,1.]]))
     assert torch.equal(mod.pair_costs(None,tokens,pairs),values.detach())
     positions=torch.tensor([[0.,0.],[17.,0.]])
     _,t=mod.fit(tokens[:2],positions,[[0,1]],updates=1,batch_size=4,bottleneck=2,lr=1e-30)
@@ -144,3 +145,47 @@ def test_changed_preparation_cache_checkpoint_and_report_are_rejected(multigoal_
     path.write_bytes(original)
     path=output/'report.json';path.write_bytes(path.read_bytes()+b'changed')
     with pytest.raises(ValueError,match='hash|artifact'):mod.report(output,render=False)
+
+
+def test_plots_regenerate_without_local_cache_and_show_all_goals(multigoal_prepared):
+    import shutil
+    mod,_,output,cache,*_=multigoal_prepared
+    for branch in ('single','multi'):mod.train(output,cache,branch)
+    mod.evaluate(output,cache,render=False)
+    shutil.rmtree(cache)
+    r=mod.report(output,render=True)
+    assert len(list(output.glob('*.pdf')))==7
+    for name in ('coverage','training_loss','goal_summary','goal_3_heatmaps'):
+        assert (output/f'{name}.png').stat().st_size>1000
+    assert r['methods']['multi'][0]['reference_status']=='seen'
+    assert all(g['reference_status']=='withheld' for g in r['methods']['multi'][1:])
+
+
+def test_multigoal_notebook_compiles_commands_and_executes_actual_reporting(multigoal_prepared,monkeypatch):
+    import ast,json,sys,types,subprocess
+    from pathlib import Path
+    notebook=Path(__file__).resolve().parents[1]/'notebooks/radial_multigoal_colab.ipynb'
+    assert notebook.is_file(), 'multi-goal notebook missing'
+    n=json.loads(notebook.read_text())
+    for c in n['cells']:
+        if c['cell_type']=='code':compile(''.join(c['source']),'<notebook>','exec')
+    mod,_,output,cache,*_=multigoal_prepared
+    for branch in ('single','multi'):mod.train(output,cache,branch)
+    mod.evaluate(output,cache,render=True)
+    context=dict(sys=sys,OUTPUT=output,CACHE=cache,REPO=Path.cwd(),json=json,
+        SOURCE_RUN=Path('source'),ENCODER=Path('encoder'),DINO_ROOT=Path('renderer'))
+    tree=ast.parse(''.join(n['cells'][3]['source']))
+    nodes=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='command']
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'<command>','exec'),context)
+    assert '--cache-dir' not in context['command']('report')
+    assert context['command']('train','multi')[-2:]==['--branch','multi']
+    displayed=[]
+    class Image:
+        def __init__(self,filename):assert Path(filename).is_file();displayed.append(filename)
+    ip=types.ModuleType('IPython');display=types.ModuleType('IPython.display')
+    display.display=lambda image:None;display.Image=Image
+    monkeypatch.setitem(sys.modules,'IPython',ip);monkeypatch.setitem(sys.modules,'IPython.display',display)
+    context['shell']=lambda command,cwd=None:subprocess.run(list(map(str,command)),cwd=cwd,check=True)
+    context['time']=__import__('time')
+    for index in (9,11,13):exec(''.join(n['cells'][index]['source']),context)
+    assert len(displayed)==7
