@@ -50,3 +50,13 @@ Missing figures regenerate from verified results without encoding or fitting.
 
 Local tests use synthetic features; actual GPU/goal-transfer results await
 user execution. Outcomes concern this checkpoint, displacement and goal set.
+
+## Verification
+
+Production source pin: `8fc35399ea9578512f3016e6e6aad228298d2ad9`.
+Full local suite:457tests and16subtests passed with4existing warnings.
+Synthetic nine-goal evaluation/report CLI exported28PNG/19PDF artifacts, and
+actual notebook settings, repeated-goal command, report/display/summary cells
+passed. Fresh review found one empty-notebook-list fallback; a failing regression
+and full suite verified its fix. No GPU/scientific transfer claims precede the
+user's run.

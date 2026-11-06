@@ -28,15 +28,15 @@
 **Files:** radial_goal_transfer.py, radial_goal_transfer_plots.py, tests/test_radial_goal_sweep.py.
 **Interfaces:** existing evaluate/load_report accept [x,y] or [[x,y],...]; CLI repeated --new-goal.
 
-- [ ] RED:9reference goals with batch8 and unique coordinate encodes, exact source/adapter integrity, common counts, dynamic files/reuse, invalid goal lists and empty summary plots.
-- [ ] Implement normalized goal lists, buffered reference scoring, dynamic hashes/recovery and summary plots.
-- [ ] Focused new+legacy tests GREEN, synthetic evaluator/report CLI/figures; commit.
+- [x] RED:9reference goals with batch8 and unique coordinate encodes, exact source/adapter integrity, common counts, dynamic files/reuse, invalid goal lists and empty summary plots.
+- [x] Implement normalized goal lists, buffered reference scoring, dynamic hashes/recovery and summary plots.
+- [x] Focused new+legacy tests GREEN, synthetic evaluator/report CLI/figures; commit.
 
 ### Task 2: Sweep notebook and publication
 
 **Files:** notebooks/radial_goal_sweep_colab.ipynb, docs/radial_goal_sweep.md.
 **Interfaces:** pinned setup -> repeated-goal evaluate -> summary and per-goal heatmaps.
 
-- [ ] Compile code cells and execute result/summary cells against synthetic output; verify old notebooks unchanged.
-- [ ] Full suite, commit, fresh final review and one Important/Critical RED->GREEN fix pass if needed.
-- [ ] Pin verified code, push same branch, verify remote HEAD/clean state, retain worktree and remove only plan scratch.
+- [x] Compile code cells and execute result/summary cells against synthetic output; verify old notebooks unchanged.
+- [x] Full suite, commit, fresh final review and one Important/Critical RED->GREEN fix pass if needed.
+- [x] Pin verified code, push same branch, verify remote HEAD/clean state, retain worktree and remove only plan scratch.
