@@ -113,3 +113,15 @@ def test_read_only_audit_renders_real_probes_and_preserves_experiment(curriculum
         mod.audit(free,free.root/'audit',env,encode)
     with pytest.raises(ValueError,match='empty|new'):
         mod.audit(free,out,env,encode)
+
+
+def test_endpoint_ranking_does_not_change_when_only_an_interior_ridge_is_added():
+    mod=geometry()
+    replay=mod.curve_metrics([1.0001,1.0])
+    fresh=mod.curve_metrics([1.0001,3.0,1.0])
+    assert replay['endpoint_correct'] is True
+    assert fresh['endpoint_correct'] is True
+    assert fresh['endpoint_correct']==replay['endpoint_correct']
+    assert fresh['up_steps']==1  # The genuine interpolation failure remains visible.
+    assert fresh['informative_monotone'] is False
+    assert mod.curve_metrics([3,5000,1])['uphill_normalized']==2498.5

@@ -21,6 +21,8 @@ Metrics: endpoint accuracy, increasing/decreasing/tied local steps, magnitude
 of uphill motion normalized by endpoint contrast, reversal frequency by
 offset and nearest-training-distance bins. Use tolerance max(1e-7,1e-3 times
 the cost range of that method/profile). Flat curves cannot pass as informative.
+Endpoint order uses max(1e-7,1e-3 times absolute endpoint contrast),
+independent of interior ridges, for consistent replay/fresh checks.
 Show raw values, pair-relative curves, worst cases and a geometry-selected
 sample; results are descriptive, pairs within an episode are dependent.
 

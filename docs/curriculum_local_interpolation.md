@@ -26,7 +26,10 @@ historical target pixels. The fixed goal counts as a fitting reference.
 
 Metrics distinguish uphill, downhill and tied steps, endpoint ordering,
 informative monotonicity and flat curves. Tolerance is max(1e-7, 1e-3 times that
-method/profile's cost range). Both endpoints must be unseen for the unseen
+method/profile's cost range). Endpoint ordering uses its own tolerance,
+max(1e-7, 1e-3 times absolute endpoint contrast), independent of interior
+ridges; replay/fresh comparisons therefore share one endpoint rule.
+Both endpoints must be unseen for the unseen
 comparison summary. Uphill magnitudes are saved in raw cost units and divided
 by absolute endpoint contrast when nonzero. Counts are descriptive, not
 independent statistical trials.
@@ -44,3 +47,13 @@ and remain readable; the diagnostic writes its own expanded maps.
 Existing checkpoints alone cannot prove a deliberate spatial holdout. If most
 probes are covered by training, a later sparse refit with withheld neighborhoods
 will be needed. Transfer to other goals is a separate experiment.
+
+## Verification
+
+425 tests passed (four existing warnings, 16 subtests). Synthetic integration
+exercised the real CLI, source immutability checks, fresh scoring, notebook
+result cells and six PNG/PDF plot exports; GPU/encoder/renderer boundaries and
+local display were substituted for that workflow. The actual pinned renderer
+also rendered x=59.999 and neighboring coordinates successfully. All six
+notebook code cells compile. Real GPU encoding, Colab setup and empirical
+results remain pending user execution.

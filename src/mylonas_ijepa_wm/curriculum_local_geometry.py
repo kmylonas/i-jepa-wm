@@ -103,11 +103,15 @@ def curve_metrics(costs):
     delta = np.diff(values)
     up, down = delta>tolerance, delta < -tolerance
     contrast = float(values[0]-values[-1])
-    return dict(tolerance=tolerance,endpoint_correct=bool(contrast>tolerance),
+    # Endpoint order must not change merely because an interior ridge changes
+    # the profile range. Replay/fresh endpoint checks use this same rule.
+    endpoint_tolerance = max(1e-7,1e-3*abs(contrast))
+    return dict(tolerance=tolerance,endpoint_tolerance=endpoint_tolerance,
+        endpoint_correct=bool(contrast>endpoint_tolerance),
         endpoint_contrast=contrast,up_steps=int(up.sum()),down_steps=int(down.sum()),
         tie_steps=int((~(up|down)).sum()),up_fraction=float(up.mean()),
         max_uphill=float(np.maximum(delta,0).max()),
-        uphill_normalized=float(delta[up].sum()/abs(contrast)) if abs(contrast)>tolerance else None,
+        uphill_normalized=float(delta[up].sum()/abs(contrast)) if abs(contrast)>endpoint_tolerance else None,
         informative_monotone=bool(not up.any() and down.any()),flat=bool(not (up|down).any()))
 
 
