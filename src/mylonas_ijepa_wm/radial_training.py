@@ -40,11 +40,11 @@ def fit(tokens,radii,goal,*,seed,updates=500,batch_size=16,lr=1e-4,bottleneck=64
     scale=float(positive.median())
     target=goal.to(device)
     @torch.no_grad()
-    def accuracy():
+    def full_metrics():
         costs=torch.cat([token_goal_cost(adapter,chunk.to(device),target).cpu() for chunk in tokens.split(16)])
         differences=costs[pairs[:,0]]-costs[pairs[:,1]]
-        return float((differences>1e-7).float().mean())
-    before=accuracy()
+        return float((differences>1e-7).float().mean()),float(F.softplus(.2-differences/scale).mean())
+    before,loss_before=full_metrics()
     optimizer=torch.optim.Adam(adapter.parameters(),lr=lr)
     rng=np.random.default_rng(seed)
     history=[];counts=torch.zeros(len(tokens),dtype=torch.int64)
@@ -59,10 +59,13 @@ def fit(tokens,radii,goal,*,seed,updates=500,batch_size=16,lr=1e-4,bottleneck=64
         torch.nn.utils.clip_grad_norm_(adapter.parameters(),1.,error_if_nonfinite=True)
         optimizer.step()
         row=dict(update=update+1,rank_loss=float(loss.detach()))
+        if update==0 or (update+1)%50==0 or update+1==updates:
+            row['full_rank_accuracy'],row['full_rank_loss']=full_metrics()
         history.append(row)
         if progress and (update==0 or (update+1)%50==0):progress(row)
     adapter.eval()
     return adapter,dict(seed=seed,updates=updates,batch_size=batch_size,lr=lr,bottleneck=bottleneck,
         anchor_weight=0,loss='softplus(0.2-(far-near)/scale)',scale=scale,eligible_pairs=len(pairs),
         initialization='identity' if initial_adapter is None else 'previous_checkpoint',optimizer_reset=True,
-        sample_counts=counts.tolist(),rank_accuracy_before=before,rank_accuracy_after=accuracy(),history=history)
+        sample_counts=counts.tolist(),rank_accuracy_before=before,rank_accuracy_after=full_metrics()[0],
+        full_rank_loss_before=loss_before,history=history)
