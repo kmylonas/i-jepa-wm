@@ -44,4 +44,32 @@ def plot_transfer(output,report):
         for ext in ('png','pdf'):
             path=output/f'goal_{j}_calibration.{ext}';fig.savefig(path,dpi=140,bbox_inches='tight');paths.append(str(path))
         plt.close(fig)
+    paths.extend(plot_goal_summary(output,report))
+    return paths
+
+
+def plot_goal_summary(output,report):
+    goals=np.asarray([g['goal'] for g in report['goals']]);offsets=goals-goals[0]
+    fig,axes=plt.subplots(1,2,figsize=(11,4.5),constrained_layout=True)
+    arrays=([g['heldout_common']['adapted']['mae'] for g in report['goals']],
+            [g['heldout_directional']['adapted_up_fraction'] for g in report['goals']])
+    for ax,items,title,factor in zip(axes,arrays,('Heldout distance MAE','Heldout uphill fraction (%)'),(1,100)):
+        values=np.array([np.nan if v is None else v*factor for v in items]);valid=np.isfinite(values)
+        if valid.any():
+            graphic=ax.scatter(offsets[valid,0],offsets[valid,1],c=values[valid],s=160,cmap='viridis',
+                vmin=0,vmax=max(float(values[valid].max()),1e-7),edgecolors='black')
+            fig.colorbar(graphic,ax=ax,shrink=.8,label='Simulation units' if factor==1 else '%')
+        if (~valid).any():ax.scatter(offsets[~valid,0],offsets[~valid,1],marker='x',c='gray',s=90,label='N/A')
+        ax.scatter(0,0,marker='*',s=260,facecolors='none',edgecolors='black',linewidths=1.5,label='Original goal')
+        for j,(dx,dy) in enumerate(offsets):ax.annotate(str(j),(dx,dy),xytext=(7,7),textcoords='offset points')
+        extent=max(1.,float(np.abs(offsets).max()))+1
+        ax.set(title=title,xlabel='Goal shift dx',ylabel='Goal shift dy',aspect='equal',
+            xlim=(-extent,extent),ylim=(-extent,extent))
+        ax.grid(alpha=.2);ax.legend(fontsize=8)
+    count=report['goals'][0]['heldout_common']['count']
+    fig.suptitle(f'Frozen adapter: same {count} heldout ball positions for every goal\nNumbers match the per-goal table; N/A is not zero error.')
+    paths=[]
+    for ext in ('png','pdf'):
+        path=Path(output)/f'goal_summary.{ext}';fig.savefig(path,dpi=140,bbox_inches='tight');paths.append(str(path))
+    plt.close(fig)
     return paths

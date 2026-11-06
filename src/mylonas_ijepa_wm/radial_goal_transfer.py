@@ -17,7 +17,17 @@ from src.mylonas_ijepa_wm.radial_geometry import make_design
 
 
 SCALE=34.
-FILES=('report.json','goals.pt','goal_0.png','goal_1.png')
+def _files(count):return ('report.json','goals.pt',*(f'goal_{j}.png' for j in range(count)))
+
+
+def _new_goals(values):
+    try:goals=np.asarray(values,dtype=float)
+    except (ValueError,TypeError) as exc:raise ValueError('finite goal coordinate pairs required') from exc
+    if goals.shape==(2,):goals=goals.reshape(1,2)
+    if goals.ndim!=2 or goals.shape[1]!=2 or not len(goals) or not np.isfinite(goals).all():
+        raise ValueError('nonempty finite goal coordinate pairs required')
+    if len(np.unique(goals,axis=0))!=len(goals):raise ValueError('duplicate goals are not allowed')
+    return goals
 
 
 def load_source(root,stage):
@@ -90,19 +100,21 @@ def _signature(source,execution):
 
 
 def _inputs(source,new_goal,execution):
-    return dict(source=source['metadata'],new_goal=list(map(float,new_goal)),execution=execution,
+    return dict(source=source['metadata'],new_goals=_new_goals(new_goal).tolist(),execution=execution,
         diagnostic_source=source_digest(Path(__file__).parents[1]))
 
 
 def _load(output,inputs,render):
     complete=read(output/'complete.json')
-    if complete['inputs']!=inputs or complete['files']!={n:file_sha256(output/n) for n in FILES}:
+    count=len(inputs['new_goals'])+1
+    if complete['inputs']!=inputs or complete['files']!={n:file_sha256(output/n) for n in _files(count)}:
         raise ValueError('goal-transfer inputs/config/artifact hashes differ')
     report=read(output/'report.json')
+    if len(report['goals'])!=count:raise ValueError('goal-transfer report goal count differs')
     if render:
         from src.mylonas_ijepa_wm.radial_goal_transfer_plots import plot_transfer
-        if any(not (output/f'goal_{j}_{name}.{ext}').is_file() for j in (0,1)
-                for name in ('heatmaps','calibration') for ext in ('png','pdf')):
+        names=[f'goal_{j}_{name}' for j in range(count) for name in ('heatmaps','calibration')]+['goal_summary']
+        if any(not (output/f'{name}.{ext}').is_file() for name in names for ext in ('png','pdf')):
             plot_transfer(output,report)
     return report
 
@@ -118,15 +130,17 @@ def evaluate(source_root,output,stage,new_goal,env,encode,execution,*,device='cp
     output,source_root=locations(output,source_root);source=load_source(source_root,stage)
     if batch_size<2:raise ValueError('goal-transfer batch size must be at least2')
     _signature(source,execution)
-    old=np.asarray(source['design']['goal']);new=np.asarray(new_goal,dtype=float)
+    old=np.asarray(source['design']['goal']);new_goals=_new_goals(new_goal)
     radius=source['metadata']['radius'];lower,upper=source['design']['bounds']
-    if (new.shape!=(2,) or not np.isfinite(new).all() or new[0]<=35 or (new<lower).any()
-            or (new>upper).any() or np.linalg.norm(new-old)>radius+1e-5 or np.linalg.norm(new-old)<1e-5):
+    distances=np.linalg.norm(new_goals-old,axis=1)
+    if ((new_goals[:,0]<=35).any() or (new_goals<lower).any() or (new_goals>upper).any()
+            or (distances>radius+1e-5).any() or (distances<1e-5).any()):
         raise ValueError('new goal must differ and stay inside original fitting region/radius')
-    inputs=_inputs(source,new,dict(execution,encoder_batch_size=batch_size))
+    inputs=_inputs(source,new_goals,dict(execution,encoder_batch_size=batch_size))
     if (output/'complete.json').exists():return _load(output,inputs,render)
     if output.exists() and any(output.iterdir()):raise ValueError('incomplete/unrelated diagnostic output; choose a new directory')
-    goals=np.stack([old,new]);grid=source['design']['grid'];grid_ids=grid['point_ids']
+    goals=np.vstack([old,new_goals]);count=len(goals)
+    grid=source['design']['grid'];grid_ids=grid['point_ids']
     points=[source['design']['points'][i] for i in grid_ids];lookup={tuple(p):i for i,p in enumerate(points)}
     goal_ids=[]
     for goal in goals:
@@ -135,30 +149,40 @@ def evaluate(source_root,output,stage,new_goal,env,encode,execution,*,device='cp
         goal_ids.append(lookup[key])
     env.reset(0,layout=[32,30],start=[44,34],goal=old.tolist())
     reference=env._render_at(points[0]);goal_frames=[env._render_at(old)]
-    env.reset(0,layout=[32,30],start=[44,34],goal=new.tolist())
-    if not np.array_equal(reference,env._render_at(points[0])):
-        raise ValueError('goal change altered observation scene; this marker-free protocol does not apply')
-    goal_frames.append(env._render_at(new))
+    for new in new_goals:
+        env.reset(0,layout=[32,30],start=[44,34],goal=new.tolist())
+        if not np.array_equal(reference,env._render_at(points[0])):
+            raise ValueError('goal change altered observation scene; this marker-free protocol does not apply')
+        goal_frames.append(env._render_at(new))
     adapter=source['adapter'].to(device).eval().requires_grad_(False)
     before={k:v.detach().cpu().clone() for k,v in adapter.state_dict().items()}
     # Encode goal coordinates first, then each other coordinate exactly once.
     # Query self-costs use the very same tokens as the reference, even when
     # encoder numerics depend on batch shape.
     order=goal_ids+[i for i in range(len(points)) if i not in goal_ids]
-    raw=np.empty((2,len(points)));adapted=np.empty_like(raw);hashes=[None]*len(points)
+    raw=np.empty((count,len(points)));adapted=np.empty_like(raw);hashes=[None]*len(points)
+    pending=[];target_parts=[];reference_count=0;goal_tokens=None
     import hashlib
     with torch.inference_mode():
         for start in range(0,len(order),batch_size):
             indices=order[start:start+batch_size]
             frames=np.stack([env._render_at(points[i]) for i in indices])
             tokens=encode(frames).detach().to(device).float()
-            if start==0:target_tokens=tokens[:2].cpu().clone();goal_tokens=target_tokens.to(device)
-            if tokens.ndim!=3 or len(tokens)!=len(indices) or tokens.shape[1:]!=goal_tokens.shape[1:] or not torch.isfinite(tokens).all():
+            if tokens.ndim!=3 or len(tokens)!=len(indices) or tokens.shape[1:]!=source['cached_goal'].shape or not torch.isfinite(tokens).all():
                 raise ValueError('invalid fresh goal-transfer tokens')
             for i,frame in zip(indices,frames):hashes[i]=hashlib.sha256(frame.tobytes()).hexdigest()
-            for j in (0,1):
-                raw[j,indices]=(tokens-goal_tokens[j]).square().mean(dim=(1,2)).cpu().numpy()
-                adapted[j,indices]=token_goal_cost(adapter,tokens,goal_tokens[j]).cpu().numpy()
+            if goal_tokens is None:
+                pending.append((indices,tokens))
+                take=min(count-reference_count,len(tokens));target_parts.append(tokens[:take]);reference_count+=take
+                if reference_count<count:continue
+                target_tokens=torch.cat(target_parts).cpu().clone();goal_tokens=target_tokens.to(device)
+                batches=pending
+            else:batches=[(indices,tokens)]
+            for batch_ids,batch in batches:
+                for j in range(count):
+                    raw[j,batch_ids]=(batch-goal_tokens[j]).square().mean(dim=(1,2)).cpu().numpy()
+                    adapted[j,batch_ids]=token_goal_cost(adapter,batch,goal_tokens[j]).cpu().numpy()
+            pending=[];target_parts=[]
     if not np.isfinite(raw).all() or not np.isfinite(adapted).all():raise ValueError('nonfinite goal-transfer scores')
     offered=source['design']['stages'][stage-1]['training_ids']+[source['design']['goal_id']]
     fitted=np.asarray([source['design']['points'][i] for i in offered])
@@ -189,7 +213,7 @@ def evaluate(source_root,output,stage,new_goal,env,encode,execution,*,device='cp
         original_goal_consistency=dict(raw_token_mse=float((target_tokens[0]-source['cached_goal']).square().mean()),
             mean_raw_grid_change=float(np.abs(np.asarray(raw[0])[:len(grid_ids)]-old_raw).mean()),
             mean_adapted_grid_change=float(np.abs(np.asarray(adapted[0])[:len(grid_ids)]-old_adapt).mean())),
-        note='No fitting or recalibration. Main cohort stays inside original fitting disk and known distance range for both goals.')
+        note='No fitting or recalibration. Main cohort stays inside original fitting disk and known distance range for every goal.')
     output.mkdir(parents=True,exist_ok=True)
     save_tensors(output/'goals.pt',dict(tokens=target_tokens,positions=goals.tolist()))
     for j,frame in enumerate(goal_frames):Image.fromarray(frame).save(output/f'goal_{j}.png')
@@ -197,7 +221,7 @@ def evaluate(source_root,output,stage,new_goal,env,encode,execution,*,device='cp
     if render:
         from src.mylonas_ijepa_wm.radial_goal_transfer_plots import plot_transfer
         plot_transfer(output,report)
-    write_json(output/'complete.json',dict(inputs=inputs,files={n:file_sha256(output/n) for n in FILES}))
+    write_json(output/'complete.json',dict(inputs=inputs,files={n:file_sha256(output/n) for n in _files(count)}))
     return report
 
 
@@ -205,9 +229,10 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('operation',choices=('evaluate','report'));p.add_argument('--source-run',type=Path,required=True)
     p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--stage',type=int,default=4)
-    p.add_argument('--new-goal',type=float,nargs=2,default=[46,38]);p.add_argument('--device',default='cuda')
+    p.add_argument('--new-goal',type=float,nargs=2,action='append',help='repeat for multiple goals');p.add_argument('--device',default='cuda')
     p.add_argument('--encoder-checkpoint',type=Path);p.add_argument('--dino-wm-root',type=Path)
     args=p.parse_args(argv)
+    if args.new_goal is None:args.new_goal=[[46,38]]
     if args.operation=='report':
         r=load_report(args.source_run,args.output_dir,args.stage,args.new_goal)
         print(f"Verified goal-transfer report: {len(r['goals'])} goals, frozen stage{args.stage}");return r
