@@ -51,8 +51,10 @@ def validate(output,cache):
     if run['files']!=_hashes(output,run['files']):raise ValueError('radial input artifact hash differs')
     config,design=read(output/'config.json'),read(output/'design.json')
     index=read(output/'cache_manifest.json')
-    if (index!=read(cache/'index.json') or config['kind'] not in ('radial_ranking_v1','radial_distance_v1')
+    if (index!=read(cache/'index.json') or config['kind'] not in ('radial_ranking_v1','radial_distance_v1','radial_position_v1')
             or (config['kind']=='radial_distance_v1' and config.get('distance_scale')!=34.)
+            or (config['kind']=='radial_position_v1' and
+                (config.get('position_scale')!=34. or config.get('position_center')!=[50.,42.]))
             or config['design_digest']!=digest(design) or design!=make_design(tuple(design['bounds']))
             or index['config_digest']!=digest(config)
             or config['signature'].get('source')!=source_digest(Path(__file__).parents[1])):
@@ -69,16 +71,21 @@ def validate(output,cache):
 
 def prepare(output,cache,env,encode,signature,*,fitting=None,batch_size=8,objective='ranking'):
     output,cache=locations(output,cache)
-    if objective not in ('ranking','distance'):raise ValueError('unknown radial objective')
+    if objective not in ('ranking','distance','position'):raise ValueError('unknown radial objective')
     env.reset(0,layout=[32,30],start=[44,34],goal=[50,42])
     design=make_design(physical_bounds(env.env))
     default=FITTING if objective=='ranking' else dict(FITTING,batch_size=32)
+    if objective=='position':
+        from src.mylonas_ijepa_wm.radial_position import FITTING as position_fitting
+        default=position_fitting
     fitting=dict(default if fitting is None else fitting)
-    if set(fitting)!=set(FITTING) or batch_size<1:raise ValueError('invalid radial fitting configuration')
-    config=dict(kind='radial_ranking_v1' if objective=='ranking' else 'radial_distance_v1',design_digest=digest(design),
+    if set(fitting)!=set(default) or batch_size<1:raise ValueError('invalid radial fitting configuration')
+    kinds=dict(ranking='radial_ranking_v1',distance='radial_distance_v1',position='radial_position_v1')
+    config=dict(kind=kinds[objective],design_digest=digest(design),
         signature=dict(signature,source=source_digest(Path(__file__).parents[1])),
         fitting=fitting,encoder_batch_size=batch_size,stage_seeds=[0,1,2,3])
     if objective=='distance':config['distance_scale']=34.
+    if objective=='position':config.update(position_scale=34.,position_center=[50.,42.])
     if (output/'run.json').exists():
         old,_,_=validate(output,cache)
         if old!=config:raise ValueError('radial config/signature changed; use a new output')
@@ -137,6 +144,9 @@ def stage(output,cache,index,*,device='cpu',render=True):
     output,cache=locations(output,cache)
     if index not in (1,2,3,4):raise ValueError('stage index must be1..4')
     config,design,cache_index=validate(output,cache)
+    if config['kind']=='radial_position_v1':
+        from src.mylonas_ijepa_wm.radial_position_experiment import position_stage
+        return position_stage(output,cache,index,config,design,cache_index,device=device,render=render)
     objective='distance' if config['kind']=='radial_distance_v1' else 'ranking'
     incoming=None;incoming_sha=None
     # Validate the whole completed chain before fitting or admitting results.
@@ -210,7 +220,7 @@ def main(argv=None):
     parser.add_argument('--encoder-checkpoint',type=Path)
     parser.add_argument('--dino-wm-root',type=Path)
     parser.add_argument('--stage-index',type=int)
-    parser.add_argument('--objective',choices=('ranking','distance'),help='prepare only; stages use their signed configuration')
+    parser.add_argument('--objective',choices=('ranking','distance','position'),help='prepare only; stages use their signed configuration')
     parser.add_argument('--device',default='cuda')
     args=parser.parse_args(argv)
     if args.operation=='stage':

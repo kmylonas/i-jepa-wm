@@ -5,11 +5,12 @@ import numpy as np
 from src.mylonas_ijepa_wm.curriculum_local_geometry import coverage,curve_metrics
 
 
-def summarize(design,raw,adapted,frame_hashes,offered_ids,actual_ids,radius):
+def summarize(design,raw,adapted,frame_hashes,offered_ids,actual_ids,radius,*,include_goal_reference=True):
     points=np.asarray(design['points'])
     all_radii=np.linalg.norm(points-np.asarray(design['goal']),axis=1)
-    offered_ids=sorted(set(offered_ids)|{design['goal_id']})
-    actual_ids=sorted(set(actual_ids)|{design['goal_id']})
+    reference={design['goal_id']} if include_goal_reference else set()
+    offered_ids=sorted(set(offered_ids)|reference)
+    actual_ids=sorted(set(actual_ids)|reference)
     exposure=coverage(points,points[actual_ids],points[offered_ids])
     offered_hashes={frame_hashes[i] for i in offered_ids}
     actual_hashes={frame_hashes[i] for i in actual_ids}

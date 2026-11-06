@@ -66,3 +66,56 @@ def test_position_metrics_exclude_exposure_deduplicate_and_measure_true_xy_error
     final=module().summarize_positions(design,prediction,hashes,[1,2],[1],34)
     assert final['directional']['outside']['count']==0
     assert final['directional']['outside']['model']['mean_position_error'] is None
+
+
+def position_run(prepared_radial):
+    runner,oldout,oldcache,_,env,encode,signature=prepared_radial
+    out,cache=oldout.parent/'position',oldcache.parent/'position-cache'
+    prepared=runner.prepare(out,cache,env,encode,signature,objective='position',
+        fitting=dict(updates=2,batch_size=4,projection=3,hidden=4,lr=1e-3))
+    return runner,out,cache,prepared,env,encode,signature
+
+
+def test_cumulative_position_stages_fit_only_offered_xy_and_recover_figures(prepared_radial,monkeypatch):
+    runner,out,cache,prepared,*_=position_run(prepared_radial)
+    mod=module();original=mod.fit;seen=[];previous=None;near_counts=[]
+    data=torch.load(out/'training_data.pt',weights_only=True)
+    for index,n in enumerate((48,90,105,115),1):
+        ids=prepared['design']['stages'][index-1]['training_ids']
+        take=[data['point_ids'].index(i) for i in ids]
+        expected=torch.tensor([prepared['design']['points'][i] for i in ids])
+        def checked(tokens,positions,**kwargs):
+            assert torch.equal(tokens,data['tokens'][take])
+            assert torch.equal(positions,expected)
+            seen.append(len(tokens));return original(tokens,positions,**kwargs)
+        monkeypatch.setattr(mod,'fit',checked)
+        r=runner.stage(out,cache,index)
+        assert r['objective']=='position' and r['training_positions']==n
+        assert r['incoming_sha256']==previous
+        previous=r['checkpoint_sha256']
+        assert sum(r['training']['sample_counts'])==8
+        assert set(r['actual_fitting_ids'])<=set(ids)
+        assert prepared['design']['goal_id'] not in r['actual_fitting_ids']
+        assert r['exposure']['heldout_from_offered_training'][prepared['design']['goal_id']]
+        assert r['spatial_checks']['exposure']['heldout_from_offered_training'][prepared['design']['goal_id']]
+        near_counts.append(r['position']['fixed_near_withheld_direction']['count'])
+        assert np.asarray(r['predicted_positions']).shape==(4668,2)
+    assert seen==[48,90,105,115] and len(set(near_counts))==1
+    assert r['position']['directional']['outside']['count']==0
+    monkeypatch.setattr(mod,'fit',lambda *a,**k:(_ for _ in ()).throw(AssertionError('refit')))
+    figure=out/'stages/s4/figures/position_maps.png';figure.unlink()
+    assert runner.stage(out,cache,4)['checkpoint_sha256']==previous
+    assert figure.is_file()
+
+
+def test_position_kind_normalization_and_checkpoint_chain_reject_mismatch(prepared_radial,monkeypatch):
+    runner,out,cache,prepared,env,encode,signature=position_run(prepared_radial)
+    assert prepared['config']['kind']=='radial_position_v1'
+    assert prepared['config']['position_center']==[50,42] and prepared['config']['position_scale']==34
+    with pytest.raises(ValueError,match='config|signature'):
+        runner.prepare(out,cache,env,encode,signature)
+    runner.stage(out,cache,1,render=False)
+    model=out/'stages/s1/model.pt';model.write_bytes(model.read_bytes()+b'changed')
+    monkeypatch.setattr(module(),'fit',lambda *a,**k:(_ for _ in ()).throw(AssertionError('fit corrupt chain')))
+    with pytest.raises(ValueError,match='checkpoint|artifact|hash'):
+        runner.stage(out,cache,2,render=False)
