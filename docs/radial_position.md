@@ -66,3 +66,12 @@ Local verification uses synthetic features and real CLI/notebook reporting
 cells. GPU execution and scientific position extrapolation await the Colab run.
 A failure would concern this architecture/training setup and would not establish
 that encoder features lack usable position information.
+
+## Verification
+
+Published production-code pin:
+`7a839fb66e5db25fcb1b39df98d4e3bffa070d28`. The full suite passed447tests and
+16subtests with4existing warnings. All four synthetic CLI stages exported
+20PNG/20PDF figures, and actual notebook report/display/summary cells ran.
+A fresh read-only review independently passed5position tests and found no
+actionable issues. GPU execution and scientific results await the Colab run.

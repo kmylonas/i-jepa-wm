@@ -30,24 +30,24 @@ position-stage runner sharing frozen-feature preparation, own plots and notebook
 **Files:** radial_position.py, tests/test_radial_position.py.
 **Interfaces:** PositionReadout; fit(tokens,positions,...); summarize_positions(...).
 
-- [ ] RED tests for spatial order, unbounded normalized output, actual learning/warmstarts, sample counts and correctly excluded heldout cohorts/empty bins.
-- [ ] Implement fixed-center/scale fitter and physical-unit metrics/baseline.
-- [ ] Focused tests GREEN; commit.
+- [x] RED tests for spatial order, unbounded normalized output, actual learning/warmstarts, sample counts and correctly excluded heldout cohorts/empty bins.
+- [x] Implement fixed-center/scale fitter and physical-unit metrics/baseline.
+- [x] Focused tests GREEN; commit.
 
 ### Task 2: Signed stage runner and plots
 
 **Files:** radial_experiment.py, radial_position_experiment.py, radial_position_plots.py; tests.
 **Interfaces:** prepare(...objective='position'); shared stage dispatches validated position config.
 
-- [ ] RED tests for current-stage-only fitting, objective/scale guards, lineage, corrupted artifacts, goal exposure and completed-stage/figure recovery.
-- [ ] Implement checkpoint chain, streaming predictions, numeric/derived-distance diagnostics and all figures.
-- [ ] Run position+legacy tests; synthetic four CLI stages/plots; commit.
+- [x] RED tests for current-stage-only fitting, objective/scale guards, lineage, corrupted artifacts, goal exposure and completed-stage/figure recovery.
+- [x] Implement checkpoint chain, streaming predictions, numeric/derived-distance diagnostics and all figures.
+- [x] Run position+legacy tests; synthetic four CLI stages/plots; commit.
 
 ### Task 3: Separate Colab and publication
 
 **Files:** notebooks/radial_position_colab.ipynb, docs/radial_position.md.
 **Interfaces:** prepare --objective position -> four stages -> immediate plots and final error tables.
 
-- [ ] Compile cells and execute real result/summary cells against synthetic artifacts; verify old notebooks unchanged.
-- [ ] Full suite, commit; one fresh final review and one Important/Critical RED->GREEN fix pass if needed.
-- [ ] Pin verified source; push existing branch, verify remote HEAD/clean state; retain worktree and delete only plan scratch.
+- [x] Compile cells and execute real result/summary cells against synthetic artifacts; verify old notebooks unchanged.
+- [x] Full suite, commit; one fresh final review and one Important/Critical RED->GREEN fix pass if needed.
+- [x] Pin verified source; push existing branch, verify remote HEAD/clean state; retain worktree and delete only plan scratch.
