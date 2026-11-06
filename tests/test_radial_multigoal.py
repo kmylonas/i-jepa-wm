@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import torch
 
+from test_radial_ranking import prepared_radial
+
 
 def module(name='radial_multigoal'):
     full='src.mylonas_ijepa_wm.'+name
@@ -14,6 +16,7 @@ def module(name='radial_multigoal'):
 
 
 def test_split_excludes_reserved_coordinates_images_and_identical_training_images():
+    import json
     # Node4 aliases withheld goal3; nodes1/5 share pixels; node6 exceeds pair range.
     points=[[50,42],[50,40],[48,38],[50,18],[50,18.1],[50,39.9],[50,8],[51,20]]
     hashes=['a','b','c','goal','goal','b','f','query']
@@ -28,6 +31,7 @@ def test_split_excludes_reserved_coordinates_images_and_identical_training_image
         assert a<b and a in split['train_ids'] and b in split['train_ids']
         assert 0<np.linalg.norm(np.subtract(points[a],points[b]))<=34+1e-5
     assert (0,6) in map(tuple,multi)
+    assert json.loads(json.dumps(split))==split
 
 
 def test_pair_costs_use_both_endpoints_and_target_linear_distance():
@@ -65,3 +69,78 @@ def test_pair_fit_improves_fixed_training_probe_and_has_matched_budget():
 def test_invalid_pair_populations_reject(pairs):
     with pytest.raises(ValueError,match='pair'):
         module().fit(torch.zeros(2,1,3),[[0,0],[2,0]],pairs,updates=1)
+
+
+@pytest.fixture
+def multigoal_prepared(prepared_radial):
+    runner,old,_,_,env,encode,_=prepared_radial
+    source,source_cache=old.parent/'distance-source',old.parent/'distance-cache'
+    signature=dict(encoder_sha256='synthetic',renderer_commit='pinned',precision='fp32',device_type='cpu')
+    runner.prepare(source,source_cache,env,encode,signature,objective='distance',batch_size=64,
+        fitting=dict(updates=2,batch_size=4,bottleneck=3,lr=1e-3))
+    for stage in (1,2,3,4):runner.stage(source,source_cache,stage,render=False)
+    mod=module('radial_multigoal_experiment')
+    output,cache=old.parent/'multigoal',old.parent/'multi-cache'
+    prepared=mod.prepare(source,output,cache,env,encode,signature,
+        new_goals=[[46,38],[50,18],[50,8]],batch_size=64,
+        fitting=dict(updates=3,batch_size=4,bottleneck=3,lr=1e-3,seed=0))
+    return mod,source,output,cache,prepared,env,encode,signature
+
+
+def test_matched_branches_shared_evaluation_and_training_only_calibration(multigoal_prepared):
+    from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256
+    mod,source,output,cache,prepared,*_=multigoal_prepared
+    before={str(p.relative_to(source)):file_sha256(p) for p in source.rglob('*') if p.is_file()}
+    design=prepared['design'];reserved=set(design['goal_ids'][1:])
+    data=torch.load(output/'training_data.pt',weights_only=True)
+    assert not reserved.intersection(data['point_ids'])
+    for branch in ('single','multi'):
+        saved=mod.train(output,cache,branch)
+        assert sum(saved['endpoint_counts'])==24 and sum(saved['pair_sample_counts'])==12
+        assert saved['initialization']=='identity'
+    r=mod.evaluate(output,cache,render=False)
+    assert r['source_unchanged'] and r['distance_scale']==34
+    assert r['original_goal_consistency']['raw_token_mse']==0
+    assert set(r['methods'])=={'single','multi','historical'}
+    for rows in r['methods'].values():
+        assert len(rows)==4 and all(g['raw_self_cost']==0 and g['adapted_self_cost']<1e-7 for g in rows)
+        assert all(g['common_mask']==rows[0]['common_mask'] for g in rows)
+        assert all(g['heldout_common']['count']==rows[0]['heldout_common']['count']>0 for g in rows)
+    assert r['methods']['single'][0]['common_mask']==r['methods']['multi'][0]['common_mask']
+    raw=module().pair_costs(None,data['tokens'],data['pairs']['multi']).numpy()
+    xy=np.asarray(data['positions']);pairs=np.asarray(data['pairs']['multi'])
+    distances=np.linalg.norm(xy[pairs[:,0]]-xy[pairs[:,1]],axis=1)
+    assert r['raw_calibration']==pytest.approx(float(raw@distances/(raw@raw)))
+    assert before=={str(p.relative_to(source)):file_sha256(p) for p in source.rglob('*') if p.is_file()}
+
+
+def test_completed_reuse_and_report_survive_local_cache_deletion(multigoal_prepared,monkeypatch):
+    import shutil
+    mod,source,output,cache,prepared,env,_,signature=multigoal_prepared
+    for branch in ('single','multi'):mod.train(output,cache,branch)
+    first=mod.evaluate(output,cache,render=False)
+    monkeypatch.setattr(mod,'fit',lambda *a,**k:(_ for _ in ()).throw(AssertionError('refit')))
+    mod.train(output,cache,'multi')
+    def forbidden(frames):raise AssertionError('re-encoding')
+    assert mod.prepare(source,output,cache,env,forbidden,signature,
+        new_goals=[[46,38],[50,18],[50,8]],batch_size=64,
+        fitting=dict(updates=3,batch_size=4,bottleneck=3,lr=1e-3,seed=0))['design']==prepared['design']
+    shutil.rmtree(cache)
+    assert mod.report(output,render=False)==first
+    assert mod.evaluate(output,cache,render=False)==first
+
+
+def test_changed_preparation_cache_checkpoint_and_report_are_rejected(multigoal_prepared):
+    mod,source,output,cache,_,env,encode,signature=multigoal_prepared
+    with pytest.raises(ValueError,match='config|inputs|signature'):
+        mod.prepare(source,output,cache,env,encode,signature,new_goals=[[48,38]])
+    for branch in ('single','multi'):mod.train(output,cache,branch)
+    mod.evaluate(output,cache,render=False)
+    path=output/'branches/multi/adapter.pt';original=path.read_bytes();path.write_bytes(original+b'changed')
+    with pytest.raises(ValueError,match='hash|artifact|checkpoint'):mod.report(output,render=False)
+    path.write_bytes(original)
+    path=cache/'tokens.pt';original=path.read_bytes();path.write_bytes(original+b'changed')
+    with pytest.raises(ValueError,match='hash|cache'):mod.train(output,cache,'single')
+    path.write_bytes(original)
+    path=output/'report.json';path.write_bytes(path.read_bytes()+b'changed')
+    with pytest.raises(ValueError,match='hash|artifact'):mod.report(output,render=False)

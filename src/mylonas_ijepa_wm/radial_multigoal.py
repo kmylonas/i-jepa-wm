@@ -32,7 +32,7 @@ def make_split(points,candidate_ids,goal_ids,frame_hashes):
             and 0<np.linalg.norm(points[i]-points[goal_ids[0]])<=SCALE+1e-5]
     if not single or not pairs:raise ValueError('empty training pair population')
     exposed=points[train+list(goal_ids)];hashes={frame_hashes[i] for i in train+list(goal_ids)}
-    heldout=[h not in hashes and np.linalg.norm(exposed-p,axis=1).min()>1e-5
+    heldout=[bool(h not in hashes and np.linalg.norm(exposed-p,axis=1).min()>1e-5)
              for p,h in zip(points,frame_hashes)]
     return dict(train_ids=train,removed_candidate_ids=removed,
         single_pairs=[list(p) for p in single],multi_pairs=[list(p) for p in pairs],heldout_mask=heldout)
