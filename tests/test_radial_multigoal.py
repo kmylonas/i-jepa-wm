@@ -131,6 +131,23 @@ def test_completed_reuse_and_report_survive_local_cache_deletion(multigoal_prepa
     assert mod.evaluate(output,cache,render=False)==first
 
 
+def test_existing_empty_preparation_directories_are_accepted(multigoal_prepared):
+    mod,source,output,_,_,env,encode,signature=multigoal_prepared
+    new_output,new_cache=output.parent/'empty-run',output.parent/'empty-cache'
+    new_output.mkdir();new_cache.mkdir()
+    result=mod.prepare(source,new_output,new_cache,env,encode,signature,
+        new_goals=[[46,38],[50,18],[50,8]],batch_size=64,
+        fitting=dict(updates=3,batch_size=4,bottleneck=3,lr=1e-3,seed=0))
+    assert result['design']['train_ids'] and (new_output/'run.json').is_file()
+
+
+def test_existing_empty_branch_directory_is_accepted(multigoal_prepared):
+    mod,_,output,cache,*_=multigoal_prepared
+    folder=output/'branches/single';folder.mkdir(parents=True)
+    result=mod.train(output,cache,'single')
+    assert result['branch']=='single' and (folder/'complete.json').is_file()
+
+
 def test_changed_preparation_cache_checkpoint_and_report_are_rejected(multigoal_prepared):
     mod,source,output,cache,_,env,encode,signature=multigoal_prepared
     with pytest.raises(ValueError,match='config|inputs|signature'):

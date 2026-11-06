@@ -108,7 +108,7 @@ def prepare(source_root,output,cache,env,encode,execution,*,new_goals=DEFAULT_GO
     config=dict(settings,design_digest=digest(design));ids=split['train_ids'];remap={i:j for j,i in enumerate(ids)}
     data=dict(tokens=tokens[ids],point_ids=ids,positions=[points[i] for i in ids],
         pairs={b:[[remap[a],remap[c]] for a,c in split[f'{b}_pairs']] for b in ('single','multi')})
-    output.mkdir(parents=True);cache.mkdir(parents=True)
+    output.mkdir(parents=True,exist_ok=True);cache.mkdir(parents=True,exist_ok=True)
     save_tensors(cache/'tokens.pt',dict(tokens=tokens))
     manifest=dict(config_digest=digest(config),tokens_sha256=file_sha256(cache/'tokens.pt'),shape=list(tokens.shape))
     save_tensors(output/'training_data.pt',data)
@@ -146,7 +146,7 @@ def train(output,cache,branch,*,device='cpu'):
     adapter,training=fit(data['tokens'],data['positions'],data['pairs'][branch],
         device=device,progress=progress,**config['fitting'])
     training.update(branch=branch,point_ids=data['point_ids'],pair_count=len(data['pairs'][branch]))
-    folder.mkdir(parents=True)
+    folder.mkdir(parents=True,exist_ok=True)
     save_adapter(folder/'adapter.pt',adapter,training,dict(runtime_id=digest(config),inputs_digest=digest(inputs)))
     write_json(folder/'training.json',training)
     _prepared(output)
