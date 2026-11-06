@@ -163,6 +163,9 @@ def evaluate(source_root,output,stage,new_goal,env,encode,execution,*,device='cp
     offered=source['design']['stages'][stage-1]['training_ids']+[source['design']['goal_id']]
     fitted=np.asarray([source['design']['points'][i] for i in offered])
     offered_hashes={source['cache']['frame_sha256'][i] for i in offered}
+    # Query-reference images are observed too, even if their coordinates differ
+    # slightly from a grid point that rasterizes to exactly the same pixels.
+    offered_hashes.update(hashes[i] for i in goal_ids)
     heldout=np.array([np.linalg.norm(fitted-np.asarray(p),axis=1).min()>1e-5 and h not in offered_hashes
         for p,h in zip(points,hashes)])
     heldout[goal_ids]=False

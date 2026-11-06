@@ -95,3 +95,14 @@ def test_reference_coordinates_encoded_once_and_reused_for_self_cost(transfer_so
     r=module().evaluate(source,out,2,[46,38],env,batch_sensitive,signature,render=False)
     assert len(seen)==len(set(seen))
     assert all(g['raw_self_cost']==0 for g in r['goals'])
+
+
+def test_rendered_new_reference_alias_is_not_heldout(transfer_source):
+    source,out,env,encode,signature=transfer_source
+    r=module().evaluate(source,out,2,[46.0001,38],env,encode,signature,render=False)
+    points=np.asarray(r['points'])
+    grid_id=np.flatnonzero(np.all(points==[46,38],axis=1)).item()
+    # Distinct coordinate, same rasterized reference image. It is neither an
+    # original fitted coordinate nor an original fitting-image overlap.
+    assert r['goals'][1]['raw_costs'][grid_id]==0
+    assert not r['heldout_mask'][grid_id]
