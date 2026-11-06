@@ -61,13 +61,16 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
             rank_accuracy=float((delta>1e-7).float().mean()),mean_far_cost=float(far.mean()),mean_near_cost=float(near.mean()))
     before=probe();history=[dict(update=0,**before)]
     optimizer=torch.optim.Adam(adapter.parameters(),lr=lr);rng=np.random.default_rng(seed)
-    endpoints=torch.zeros(len(tokens),dtype=torch.long);refs=torch.zeros_like(endpoints);sampled=[]
+    endpoints=torch.zeros(len(tokens),dtype=torch.long);refs=torch.zeros_like(endpoints)
+    farther=torch.zeros_like(endpoints);nearer=torch.zeros_like(endpoints);sampled=[]
     for update in range(1,updates+1):
         groups=rng.integers(len(buckets),size=batch_size)
         ids=torch.as_tensor([int(rng.choice(buckets[g])) for g in groups])
         selection=population[ids];sampled.extend(ids.tolist())
         endpoints+=torch.bincount(selection.flatten(),minlength=len(tokens))
         refs+=torch.bincount(selection[:,0],minlength=len(tokens))
+        farther+=torch.bincount(selection[:,1],minlength=len(tokens))
+        nearer+=torch.bincount(selection[:,2],minlength=len(tokens))
         far,near=triplet_costs(adapter,tokens,selection,device=device,batch_size=batch_size)
         loss=F.softplus(MARGIN-(far-near)/scale).mean()
         if not torch.isfinite(loss):raise ValueError('nonfinite ranking loss')
@@ -84,6 +87,7 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
         objective='ranking',loss='mean(softplus(0.2-(far_cost-near_cost)/scale))',
         sampling='uniform_reference_then_uniform_valid_comparison',eligible_triples=len(population),
         reference_ids=reference_ids,reference_counts=refs.tolist(),endpoint_counts=endpoints.tolist(),
+        far_counts=farther.tolist(),near_counts=nearer.tolist(),
         sampled_triplet_ids=sampled,probe_triplet_ids=probe_ids.tolist(),
         probe_before=before,probe_after=after,history=history)
 
@@ -96,6 +100,13 @@ def ordinal_rows(points,goals,raw,costs,heldout,edges):
         common=np.asarray(row['common_mask']);mask=common&np.asarray(heldout,dtype=bool)
         ids=np.flatnonzero(mask);truth=np.asarray(row['true_distances'])
         far,near=np.where(truth[ids,None]-truth[None,ids]>=GAP)
+        for key in ('directional','heldout_directional'):
+            direction=row[key];count=direction['comparisons']
+            for prefix in ('raw','adapted'):
+                decreasing=count-direction[prefix+'_up_steps']-direction[prefix+'_ties']
+                direction[prefix+'_decreasing_steps']=decreasing
+                direction[prefix+'_decreasing_fraction']=decreasing/count if count else None
+                direction[prefix+'_tie_fraction']=direction[prefix+'_ties']/count if count else None
         def ranking(values):
             values=np.asarray(values)
             tolerance=max(1e-7,.001*float(np.ptp(values[common]))) if common.any() else 1e-7

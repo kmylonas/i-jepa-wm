@@ -47,6 +47,10 @@ def test_fit_improves_ranking_balances_references_and_audits_exposure():
     assert sum(t['endpoint_counts'])==4800 and len(t['sampled_triplet_ids'])==1600
     assert sum(t['reference_counts'])==1600 and abs(t['reference_counts'][0]-800)<100
     assert t['reference_counts'][2:]==[0,0,0]
+    chosen=np.asarray(population)[t['sampled_triplet_ids']]
+    assert t['far_counts']==np.bincount(chosen[:,1],minlength=5).tolist()
+    assert t['near_counts']==np.bincount(chosen[:,2],minlength=5).tolist()
+    assert (np.asarray(t['reference_counts'])+t['far_counts']+np.asarray(t['near_counts'])).tolist()==t['endpoint_counts']
     assert t['initialization']=='identity' and t['anchor_weight']==0 and t['scale']==.5
     assert t['probe_after']['rank_accuracy']>=t['probe_before']['rank_accuracy']
     assert 'distance_scale' not in t and 'distance_mae' not in t['probe_after']
@@ -61,13 +65,17 @@ def test_ordinal_metrics_accept_any_monotonic_cost_and_keep_ties_empty_groups():
     assert all(g['heldout_count']==3 for g in rows)
     assert all(g['adapted_rank']['correct_fraction']==1 for g in rows)
     assert all(g['heldout_directional']['adapted_up_fraction']==0 for g in rows)
+    assert all(g['heldout_directional']['adapted_decreasing_fraction']==1 for g in rows)
     assert all('heldout_common' not in g for g in rows)
     for values in (np.zeros_like(truth),-truth):
         r=mod.ordinal_rows(points,goals,truth,values,heldout,edges)
         key='tie_fraction' if (values==0).all() else 'reversed_fraction'
         assert all(g['adapted_rank'][key]==1 for g in r)
+        expected=1 if key=='tie_fraction' else 0
+        assert all(g['heldout_directional']['adapted_tie_fraction']==expected for g in r)
     empty=mod.ordinal_rows(points,goals,truth,truth,[False]*5,edges)
     assert all(g['adapted_rank']['comparisons']==0 and g['adapted_rank']['correct_fraction'] is None for g in empty)
+    assert all(g['heldout_directional']['adapted_tie_fraction'] is None and g['heldout_directional']['adapted_decreasing_fraction'] is None for g in empty)
 
 
 @pytest.mark.parametrize('population,scale',[([],1),([[0,0,1]],1),([[0,1,8]],1),([[0,1,2]],0)])
