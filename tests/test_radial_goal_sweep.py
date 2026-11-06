@@ -65,3 +65,19 @@ def test_later_goal_missing_figure_regenerates_from_verified_report(transfer_sou
     path=out/'goal_2_heatmaps.png';path.unlink()
     transfer.load_report(source,out,2,selected)
     assert path.is_file() and (out/'goal_summary.png').is_file()
+
+
+def test_notebook_empty_goal_list_rejects_before_cli_fallback():
+    import ast,json,sys
+    from pathlib import Path
+    notebook=Path(__file__).resolve().parents[1]/'notebooks/radial_goal_sweep_colab.ipynb'
+    n=json.loads(notebook.read_text())
+    tree=ast.parse(''.join(n['cells'][3]['source']))
+    commands=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='command']
+    context=dict(sys=sys,SOURCE_RUN=Path('source'),OUTPUT=Path('output'),SOURCE_STAGE=4,
+        NEW_GOALS=[],ENCODER=Path('encoder'),DINO_ROOT=Path('renderer'))
+    exec(compile(ast.Module(body=commands,type_ignores=[]),'notebook command','exec'),context)
+    with pytest.raises(ValueError,match='NEW_GOALS|goal'):
+        context['command']('evaluate')
+    with pytest.raises(ValueError,match='NEW_GOALS|goal'):
+        context['command']('report')
