@@ -1,0 +1,61 @@
+"""Controlled radial inputs, genuinely held-out probes and cumulative fitting."""
+import importlib
+import importlib.util
+
+import numpy as np
+import pytest
+import torch
+
+
+def module(name):
+    full='src.mylonas_ijepa_wm.'+name
+    assert importlib.util.find_spec(full), f'{name} missing'
+    return importlib.import_module(full)
+
+
+def test_design_has_cumulative_populations_and_omits_cross_wall_or_boundary_points():
+    design=module('radial_geometry').make_design()
+    assert [len(s['training_ids']) for s in design['stages']]==[48,90,105,115]
+    assert [s['outer_radius'] for s in design['stages']]==[6,14,22,34]
+    points=np.asarray(design['points'])
+    assert points[design['goal_id']].tolist()==[50.,42.]
+    assert (points[:,0]>35).all() and (points<60).all() and (points[:,1]>4).all()
+    # The invalid r10 rightward point must be omitted, never clipped to the wall.
+    assert not any(t['radius']==10 and t['angle']==0 for t in design['training'])
+    ids=[set(s['training_ids']) for s in design['stages']]
+    assert all(a<b for a,b in zip(ids,ids[1:]))
+    assert any(c['kind']=='withheld_direction' and c['angle']==7.5 for c in design['curves'])
+    train=set(ids[-1])
+    midpoint=[i for c in design['curves'] if c['kind']=='trained_direction'
+              for i,r in zip(c['point_ids'],c['radii']) if r==4]
+    assert len(midpoint)==24 and not train.intersection(midpoint)
+    assert len(design['families'])==50
+    for f in design['families']:
+        center=next(p for p in f['profiles'] if p['offset']==0)
+        assert len(center['point_ids'])==11
+        assert len(set(center['point_ids'][1:-1])&train)==0
+
+
+def test_training_pairs_include_cross_direction_examples_and_exclude_equal_radius():
+    pairs=module('radial_training').training_pairs(torch.tensor([2.,2.,6.,10.]))
+    assert set(map(tuple,pairs.tolist()))=={(2,0),(2,1),(3,0),(3,1),(3,2)}
+    with pytest.raises(ValueError,match='pair|radius'):
+        module('radial_training').training_pairs(torch.tensor([2.,2.]))
+
+
+def test_rank_only_fit_improves_order_and_warm_starts_without_mutating_incoming():
+    mod=module('radial_training')
+    tokens=torch.tensor([[[3.,0,1,0]],[[2.,1,0,0]],[[1.,0,0,1]]])
+    radii=torch.tensor([2.,6,10])
+    adapter,training=mod.fit(tokens,radii,torch.zeros(1,4),seed=7,updates=100,batch_size=8,
+        bottleneck=3,lr=.01)
+    assert training['rank_accuracy_after']>training['rank_accuracy_before']
+    assert training['rank_accuracy_after']==1
+    assert training['anchor_weight']==0 and training['initialization']=='identity'
+    assert sum(training['sample_counts'])==1600
+    before={k:v.clone() for k,v in adapter.state_dict().items()}
+    updated,more=mod.fit(tokens,radii,torch.zeros(1,4),seed=8,updates=2,batch_size=2,
+        bottleneck=3,initial_adapter=adapter)
+    assert more['initialization']=='previous_checkpoint' and more['optimizer_reset']
+    assert all(torch.equal(v,adapter.state_dict()[k]) for k,v in before.items())
+    assert updated is not adapter
