@@ -33,7 +33,9 @@ def make_design(bounds=(4.001,59.999)):
     for kind,angles in (('trained_direction',np.arange(0,360,15)),
                         ('withheld_direction',np.arange(7.5,360,15))):
         for angle in angles:
-            radii=[r for r in range(34,1,-2) if valid(position(r,angle))]
+            # Multiple withheld interior radii are needed between fitted
+            # radii2,6,...; otherwise every adjacent test includes a fitted end.
+            radii=[r for r in range(34,1,-1) if valid(position(r,angle))]
             curves.append(dict(kind=kind,angle=float(angle),radii=radii,
                 point_ids=[intern(position(r,angle)) for r in radii]))
     groups=defaultdict(list)

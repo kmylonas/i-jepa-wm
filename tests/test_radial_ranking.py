@@ -135,3 +135,11 @@ def test_changed_source_signature_rejects_cached_features_before_fit(prepared_ra
     monkeypatch.setattr(mod,'source_digest',lambda path:'changed-source',raising=False)
     with pytest.raises(ValueError,match='source|signature|config'):
         mod.stage(out,cache,1)
+
+
+def test_radial_interpolation_has_comparisons_between_two_unfitted_positions(prepared_radial):
+    mod,out,cache,*_=prepared_radial
+    report=mod.stage(out,cache,1,render=False)
+    # Between fitted radii2 and6, retain multiple unseen interior radii so
+    # comparisons of two genuinely unfitted observations have a denominator.
+    assert report['generalization']['trained_direction']['inside']['raw']['heldout_comparisons']>0
