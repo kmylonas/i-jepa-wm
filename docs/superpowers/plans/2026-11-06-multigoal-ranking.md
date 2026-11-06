@@ -33,8 +33,8 @@
 
 **Interfaces:** `triples(positions,reference_ids)` returns [G,F,N] tensor; `triplet_costs(adapter,tokens,triples,device='cpu',batch_size=16)` returns far/near costs; `fit(tokens,triples,scale,**fitting)` returns adapter/report; `ordinal_rows(...)` returns common ranking/directional rows.
 
-- [ ] Write tests for valid triplet geometry/roles, reference gradients, reference-balanced sampling/exposure, loss improvement, scale-independent ordinal counts and empty groups.
-- [ ] Run tests RED (missing module), implement, verify GREEN, commit.
+- [x] Write tests for valid triplet geometry/roles, reference gradients, reference-balanced sampling/exposure, loss improvement, scale-independent ordinal counts and empty groups.
+- [x] Run tests RED (missing module), implement, verify GREEN, commit.
 
 ### Task 2: Reproducible experiment and Colab
 
@@ -42,9 +42,9 @@
 
 **Interfaces:** `prepare(source,baseline,output,cache,env,encode,execution,*,fitting=None,new_goals=DEFAULT_GOALS,batch_size=8)`, `train(output,cache,branch,device='cpu')`, `evaluate(output,cache,device='cpu',render=True)`, `report(output,render=True)` and CLI prepare/train/evaluate/report.
 
-- [ ] Add failing synthetic complete-flow, frozen-baseline/code-signature, reuse/corruption, cache deletion, figures and notebook-report tests.
-- [ ] Implement signed parent ranking run over unchanged shared preparation, both ranking arms, frozen multi-distance comparator and ordinal evaluation.
-- [ ] Add separate full-right plots/notebook/docs; verify actual report cells and16-goal CLI workflow.
-- [ ] Run focused and full suite, inspect figures, fresh final review and fix substantive findings with regression tests. Pin notebook to verified source, publish existing branch, verify remote and clean state.
+- [x] Add failing synthetic complete-flow, frozen-baseline/code-signature, reuse/corruption, cache deletion, figures and notebook-report tests.
+- [x] Implement signed parent ranking run over unchanged shared preparation, both ranking arms, frozen multi-distance comparator and ordinal evaluation.
+- [x] Add separate full-right plots/notebook/docs; verify actual report cells and16-goal CLI workflow.
+- [x] Run focused and full suite, inspect figures, fresh final review and fix substantive findings with regression tests. Pin notebook to verified source, publish existing branch, verify remote and clean state.
 
 User authorized this experiment and the established same-worktree Colab workflow. Execute natively without another permission round; retain prior work.
