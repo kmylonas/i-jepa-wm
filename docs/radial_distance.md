@@ -63,3 +63,13 @@ Lost local tokens require a new run; earlier Drive results remain available.
 Local verification uses synthetic tokens and the real CLI/notebook reporting
 cells. Actual GPU/Colab behavior and scientific outcomes remain pending user
 execution. Other-goal transfer and planning performance are separate questions.
+
+## Verification
+
+The notebook pins production code to
+`e22cd39a8945f56e2691f656713d753c37ada1ae`. The full local suite passed:
+442 tests, 16 subtests and four existing warnings. Synthetic four-stage CLI
+runs exported all 24 PNG and 24 PDF figures, and the actual notebook reporting
+cells executed successfully. A fresh review independently passed all 17 focused
+distance/ranking tests and found no actionable issues. GPU execution and
+scientific results remain pending the Colab run.

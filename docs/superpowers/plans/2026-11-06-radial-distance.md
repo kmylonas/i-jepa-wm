@@ -30,24 +30,24 @@ a separate pinned notebook. Existing ranking behavior is the default.
 **Files:** radial_distance.py, tests/test_radial_distance.py.
 **Interfaces:** fit(tokens,radii,goal,...); distance_summary(design,raw,adapted,report).
 
-- [ ] RED: targetr/34 and fixedscale, optimization/warm starts/counts, training-only raw calibration, heldout-region empty behavior.
-- [ ] Implement fitter and report diagnostics; no heldout tensors in fitting API.
-- [ ] Focused tests GREEN; commit.
+- [x] RED: targetr/34 and fixedscale, optimization/warm starts/counts, training-only raw calibration, heldout-region empty behavior.
+- [x] Implement fitter and report diagnostics; no heldout tensors in fitting API.
+- [x] Focused tests GREEN; commit.
 
 ### Task 2: Signed runner dispatch and plots
 
 **Files:** radial_experiment.py, radial_plots.py, radial_distance_plots.py; tests.
 **Interfaces:** prepare(...,objective='ranking'); stage infers objective from signed config.
 
-- [ ] RED: explicit objective signature, four cumulative stages, changed-kind refusal, fitted-input counts, final outside N/A and legacy ranking compatibility.
-- [ ] Implement separate kind, fixedscale, defaultbatch32, dispatch and correctly labeled regression/calibration figures.
-- [ ] Focused tests GREEN; synthetic four stages/all plots; commit.
+- [x] RED: explicit objective signature, four cumulative stages, changed-kind refusal, fitted-input counts, final outside N/A and legacy ranking compatibility.
+- [x] Implement separate kind, fixedscale, defaultbatch32, dispatch and correctly labeled regression/calibration figures.
+- [x] Focused tests GREEN; synthetic four stages/all plots; commit.
 
 ### Task 3: Separate Colab and publication
 
 **Files:** notebooks/radial_distance_colab.ipynb, docs/radial_distance.md.
 **Interfaces:** separate setup -> prepare --objective distance -> stage displays -> final table.
 
-- [ ] Compile five code cells; execute stage and summary cells on synthetic outputs; verify legacy notebook unchanged.
-- [ ] Full suite; commit; one fresh final review and one Important/Critical RED→GREEN fix pass if needed.
-- [ ] Pin tested source; publish same branch; verify remote HEAD, clean status; retain worktree, remove only current plan scratch.
+- [x] Compile five code cells; execute stage and summary cells on synthetic outputs; verify legacy notebook unchanged.
+- [x] Full suite; commit; one fresh final review and one Important/Critical RED→GREEN fix pass if needed.
+- [x] Pin tested source; publish same branch; verify remote HEAD, clean status; retain worktree, remove only current plan scratch.
