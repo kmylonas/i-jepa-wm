@@ -29,15 +29,15 @@ goal scoring, common-cohort metrics/plots and separate Colab.
 **Files:** radial_goal_transfer.py, radial_goal_transfer_plots.py, tests/test_radial_goal_transfer.py.
 **Interfaces:** load_source(root,stage); evaluate(source,output,stage,new_goal,env,encode,signature,device).
 
-- [ ] RED tests: wrong source kind/corrupt chain, actual new reference and selfcost, frozen/source integrity, matched masks, changed goal/output guards, completed reuse.
-- [ ] Implement read-only loader, fresh scoring and correctly labeled metrics/plots/CLI.
-- [ ] Focused tests GREEN, synthetic evaluation/figures; commit.
+- [x] RED tests: wrong source kind/corrupt chain, actual new reference and selfcost, frozen/source integrity, matched masks, changed goal/output guards, completed reuse.
+- [x] Implement read-only loader, fresh scoring and correctly labeled metrics/plots/CLI.
+- [x] Focused tests GREEN, synthetic evaluation/figures; commit.
 
 ### Task 2: Colab and publication
 
 **Files:** notebooks/radial_goal_transfer_colab.ipynb, docs/radial_goal_transfer.md.
 **Interfaces:** pinned setup -> evaluate -> display goal images/heatmaps/tables.
 
-- [ ] Compile and execute notebook result cells on synthetic artifacts; verify legacy notebooks unchanged.
-- [ ] Full suite, commit, fresh final review and one Important/Critical RED->GREEN fix pass if required.
-- [ ] Pin tested source, push existing branch, verify remote HEAD/clean state; retain worktree and remove only plan scratch.
+- [x] Compile and execute notebook result cells on synthetic artifacts; verify legacy notebooks unchanged.
+- [x] Full suite, commit, fresh final review and one Important/Critical RED->GREEN fix pass if required.
+- [x] Pin tested source, push existing branch, verify remote HEAD/clean state; retain worktree and remove only plan scratch.

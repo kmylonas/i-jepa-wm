@@ -47,3 +47,12 @@ Changing goals/settings under an existing output rejects reuse; rerun setup
 for a new timestamp. Actual GPU/scientific transfer awaits user execution;
 the local workflow checks use synthetic features. Success is specific to the
 selected goal shift/checkpoint and does not establish general planning transfer.
+
+## Verification
+
+Production-code pin: `2cdafe088d46b4843a5147928c049025e3ce33fe`.
+Full local suite:452tests and16subtests passed with4existing warnings.
+Synthetic frozen evaluation, validated report CLI, four PNG/PDF figure pairs
+and actual notebook reporting cells passed. Fresh review identified one query-
+reference image-alias exclusion issue; a failing regression and full suite
+verified its fix. Actual GPU/goal-transfer outcomes await the Colab run.
