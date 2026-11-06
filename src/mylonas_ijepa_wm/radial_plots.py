@@ -48,7 +48,7 @@ def plot_stage(output,design,raw,report):
             ax.set(title=f"{kind.replace('_',' ')}: {method}",xlabel='Radius outward from goal →',ylabel='MSE')
             ax.grid(alpha=.2)
     axes[0,0].legend()
-    fig.suptitle('Cost versus radius: rising is desired\nTraining directions include withheld midpoint radii; withheld directions never supply fitting pairs.')
+    fig.suptitle('Cost versus radius: rising is desired\nTraining directions include withheld midpoint radii; withheld directions never supply fitting inputs.')
     save(fig,'radial_profiles')
 
     fig,axes=plt.subplots(1,2,figsize=(12,3.8),constrained_layout=True)
@@ -85,10 +85,14 @@ def plot_stage(output,design,raw,report):
     save(fig,'interpolation_examples')
 
     fig,ax=plt.subplots(figsize=(9,3),constrained_layout=True)
-    history=report['training']['history']
-    ax.plot([r['update'] for r in history],[r['rank_loss'] for r in history],alpha=.4,label='Sampled batch')
-    fixed=[r for r in history if 'full_rank_loss' in r]
-    ax.plot([r['update'] for r in fixed],[r['full_rank_loss'] for r in fixed],marker='o',label='All eligible training pairs')
-    ax.set(title=f"Stage {report['stage']}: ranking only, no anchoring",xlabel='Optimizer update',ylabel='Sampled batch rank loss')
+    regression=report.get('objective')=='distance'
+    loss_key='regression_loss' if regression else 'rank_loss';full_key='full_'+loss_key
+    history=report['training']['history'];sampled=[r for r in history if loss_key in r]
+    ax.plot([r['update'] for r in sampled],[r[loss_key] for r in sampled],alpha=.4,label='Sampled batch')
+    fixed=[r for r in history if full_key in r]
+    ax.plot([r['update'] for r in fixed],[r[full_key] for r in fixed],marker='o',
+        label='All training positions' if regression else 'All eligible training pairs')
+    ax.set(title=f"Stage {report['stage']}: {'distance regression' if regression else 'ranking only'}, no anchoring",
+        xlabel='Optimizer update',ylabel='Regression MSE' if regression else 'Sampled batch rank loss')
     ax.legend();ax.grid(alpha=.2);save(fig,'training_loss')
     return paths

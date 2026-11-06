@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import torch
 
+from test_radial_ranking import prepared_radial
+
 
 def module():
     name='src.mylonas_ijepa_wm.radial_distance'
@@ -69,3 +71,55 @@ def test_distance_diagnostics_calibrate_on_training_only_and_preserve_empty_regi
     report['outer_radius']=34
     empty=module().distance_summary(design,raw,adapted,report)['directional']['outside']
     assert empty['count']==0 and empty['adapted']['mae'] is None
+
+
+def distance_run(prepared_radial):
+    runner,oldout,oldcache,_,env,encode,signature=prepared_radial
+    out,cache=oldout.parent/'distance',oldcache.parent/'distance-cache'
+    prepared=runner.prepare(out,cache,env,encode,signature,objective='distance',
+        fitting=dict(updates=2,batch_size=4,bottleneck=3,lr=1e-3))
+    return runner,out,cache,prepared,env,encode,signature
+
+
+def test_distance_stages_only_fit_cumulative_training_and_reuse_completed_artifacts(prepared_radial,monkeypatch):
+    runner,out,cache,prepared,*_=distance_run(prepared_radial)
+    mod=module();original=mod.fit;seen=[]
+    all_data=torch.load(out/'training_data.pt',weights_only=True)
+    for stage_index,n in enumerate((48,90,105,115),1):
+        ids=prepared['design']['stages'][stage_index-1]['training_ids']
+        take=[all_data['point_ids'].index(i) for i in ids]
+        def checked(tokens,radii,goal,**kwargs):
+            assert torch.equal(tokens,all_data['tokens'][take])
+            assert torch.equal(radii,all_data['radii'][take])
+            seen.append(len(tokens));return original(tokens,radii,goal,**kwargs)
+        monkeypatch.setattr(mod,'fit',checked)
+        report=runner.stage(out,cache,stage_index)
+        assert report['training_positions']==n and report['primitive_interactions']==0
+        assert report['objective']=='distance' and report['training']['distance_scale']==34
+        assert report['initialization']==('identity' if stage_index==1 else 'previous_checkpoint')
+        assert sum(report['training']['sample_counts'])==8
+        assert set(report['actual_fitting_ids'])<=set(ids)|{prepared['design']['goal_id']}
+        assert report['distance']['training']['count']==n
+        if stage_index==4:
+            empty=report['distance']['withheld_direction']['outside']
+            assert empty['count']==0 and empty['adapted']['rmse'] is None
+    assert seen==[48,90,105,115]
+    monkeypatch.setattr(mod,'fit',lambda *a,**k:(_ for _ in ()).throw(AssertionError('refit')))
+    assert runner.stage(out,cache,4)['checkpoint_sha256']==report['checkpoint_sha256']
+
+
+def test_objective_and_fixed_distance_scale_are_signed_and_mismatches_rejected(prepared_radial):
+    import json
+    from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256
+    runner,out,cache,prepared,env,encode,signature=distance_run(prepared_radial)
+    assert prepared['config']['kind']=='radial_distance_v1'
+    assert prepared['config']['distance_scale']==34
+    with pytest.raises(ValueError,match='config|signature'):
+        runner.prepare(out,cache,env,encode,signature,objective='ranking',
+            fitting=dict(updates=2,batch_size=4,bottleneck=3,lr=1e-3))
+    path=out/'config.json';config=json.loads(path.read_text());config['distance_scale']=6
+    path.write_text(json.dumps(config))
+    run=json.loads((out/'run.json').read_text());run['files']['config.json']=file_sha256(path)
+    (out/'run.json').write_text(json.dumps(run))
+    with pytest.raises(ValueError,match='config|signature|scale'):
+        runner.stage(out,cache,1,render=False)

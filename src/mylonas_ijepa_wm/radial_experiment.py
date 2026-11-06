@@ -1,4 +1,4 @@
-"""Cached fresh radial observations and four deterministic ranking-only stages."""
+"""Cached radial observations and signed ranking or distance-regression stages."""
 
 import argparse
 import hashlib
@@ -51,7 +51,8 @@ def validate(output,cache):
     if run['files']!=_hashes(output,run['files']):raise ValueError('radial input artifact hash differs')
     config,design=read(output/'config.json'),read(output/'design.json')
     index=read(output/'cache_manifest.json')
-    if (index!=read(cache/'index.json') or config['kind']!='radial_ranking_v1'
+    if (index!=read(cache/'index.json') or config['kind'] not in ('radial_ranking_v1','radial_distance_v1')
+            or (config['kind']=='radial_distance_v1' and config.get('distance_scale')!=34.)
             or config['design_digest']!=digest(design) or design!=make_design(tuple(design['bounds']))
             or index['config_digest']!=digest(config)
             or config['signature'].get('source')!=source_digest(Path(__file__).parents[1])):
@@ -66,15 +67,18 @@ def validate(output,cache):
     return config,design,index
 
 
-def prepare(output,cache,env,encode,signature,*,fitting=None,batch_size=8):
+def prepare(output,cache,env,encode,signature,*,fitting=None,batch_size=8,objective='ranking'):
     output,cache=locations(output,cache)
+    if objective not in ('ranking','distance'):raise ValueError('unknown radial objective')
     env.reset(0,layout=[32,30],start=[44,34],goal=[50,42])
     design=make_design(physical_bounds(env.env))
-    fitting=dict(FITTING if fitting is None else fitting)
+    default=FITTING if objective=='ranking' else dict(FITTING,batch_size=32)
+    fitting=dict(default if fitting is None else fitting)
     if set(fitting)!=set(FITTING) or batch_size<1:raise ValueError('invalid radial fitting configuration')
-    config=dict(kind='radial_ranking_v1',design_digest=digest(design),
+    config=dict(kind='radial_ranking_v1' if objective=='ranking' else 'radial_distance_v1',design_digest=digest(design),
         signature=dict(signature,source=source_digest(Path(__file__).parents[1])),
         fitting=fitting,encoder_batch_size=batch_size,stage_seeds=[0,1,2,3])
+    if objective=='distance':config['distance_scale']=34.
     if (output/'run.json').exists():
         old,_,_=validate(output,cache)
         if old!=config:raise ValueError('radial config/signature changed; use a new output')
@@ -133,6 +137,7 @@ def stage(output,cache,index,*,device='cpu',render=True):
     output,cache=locations(output,cache)
     if index not in (1,2,3,4):raise ValueError('stage index must be1..4')
     config,design,cache_index=validate(output,cache)
+    objective='distance' if config['kind']=='radial_distance_v1' else 'ranking'
     incoming=None;incoming_sha=None
     # Validate the whole completed chain before fitting or admitting results.
     for earlier in range(1,index):
@@ -150,9 +155,13 @@ def stage(output,cache,index,*,device='cpu',render=True):
     data=torch.load(output/'training_data.pt',map_location='cpu',weights_only=True)
     lookup={point_id:i for i,point_id in enumerate(data['point_ids'])}
     take=[lookup[i] for i in ids]
-    adapter,training=fit(data['tokens'][take],data['radii'][take],goal,initial_adapter=incoming,
+    fitter=fit;loss_key='rank_loss'
+    if objective=='distance':
+        from src.mylonas_ijepa_wm.radial_distance import fit as distance_fit
+        fitter=distance_fit;loss_key='regression_loss'
+    adapter,training=fitter(data['tokens'][take],data['radii'][take],goal,initial_adapter=incoming,
         seed=inputs['seed'],device=device,**config['fitting'],progress=lambda row:print(
-            f"Stage {index}, R={design['stages'][index-1]['outer_radius']}: update {row['update']} rank_loss={row['rank_loss']:.6f}",flush=True))
+            f"Stage {index}, R={design['stages'][index-1]['outer_radius']}: update {row['update']} {loss_key}={row[loss_key]:.6f}",flush=True))
     actual={ids[i] for i,n in enumerate(training['sample_counts']) if n}
     # Include actual input exposure from the earlier cumulative fits as well.
     for earlier in range(1,index):
@@ -172,16 +181,22 @@ def stage(output,cache,index,*,device='cpu',render=True):
     raw=read(output/'raw_costs.json')
     measured=summarize(design,raw,scores,cache_index['frame_sha256'],ids,actual,
         design['stages'][index-1]['outer_radius'])
-    report=dict(stage=index,outer_radius=design['stages'][index-1]['outer_radius'],
+    report=dict(stage=index,objective=objective,outer_radius=design['stages'][index-1]['outer_radius'],
         training_positions=len(ids),offered_training_ids=ids,actual_fitting_ids=sorted(actual),
         incoming_sha256=incoming_sha,checkpoint_sha256=file_sha256(folder/'adapter.pt'),
         initialization=training['initialization'],training=training,adapted_costs=scores,
         raw_goal_self_cost=raw[design['goal_id']],adapted_goal_self_cost=scores[design['goal_id']],
         primitive_interactions=0,**measured)
+    if objective=='distance':
+        from src.mylonas_ijepa_wm.radial_distance import distance_summary
+        report['distance']=distance_summary(design,raw,scores,report)
     write_json(folder/'training.json',training);write_json(folder/'report.json',report)
     if render:
         from src.mylonas_ijepa_wm.radial_plots import plot_stage
         plot_stage(output,design,raw,report)
+        if objective=='distance':
+            from src.mylonas_ijepa_wm.radial_distance_plots import plot_distance
+            plot_distance(output,design,raw,report)
     write_json(folder/'complete.json',dict(inputs=inputs,
         files=_hashes(folder,('adapter.pt','training.json','report.json'))))
     return report
@@ -195,9 +210,11 @@ def main(argv=None):
     parser.add_argument('--encoder-checkpoint',type=Path)
     parser.add_argument('--dino-wm-root',type=Path)
     parser.add_argument('--stage-index',type=int)
+    parser.add_argument('--objective',choices=('ranking','distance'),help='prepare only; stages use their signed configuration')
     parser.add_argument('--device',default='cuda')
     args=parser.parse_args(argv)
     if args.operation=='stage':
+        if args.objective is not None:parser.error('--objective applies only to prepare')
         result=stage(args.output_dir,args.cache_dir,args.stage_index,device=args.device)
         print(f"Completed stage {result['stage']}: {result['training_positions']} training positions",flush=True)
         return result
@@ -219,7 +236,7 @@ def main(argv=None):
         result=prepare(args.output_dir,args.cache_dir,env,lambda f:PilotRuntime.encode_frames(runtime,f),
             dict(encoder_sha256=EXPECTED_ENCODER,renderer_commit=DINO_COMMIT,torch_version=str(torch.__version__),
                 device_type=device.type,precision='fp32',encoder_batch_size=8,
-                matmul_precision=torch.get_float32_matmul_precision()))
+                matmul_precision=torch.get_float32_matmul_precision()),objective=args.objective or 'ranking')
     finally:env.close()
     print('Prepared radial data; all four stages reuse the local token cache.',flush=True)
     return result
