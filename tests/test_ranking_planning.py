@@ -199,3 +199,35 @@ def test_changed_goal_reference_or_episode_cannot_resume(planning_prepared):
     path.write_bytes(original)
     path=out/'reference/goals.pt';path.write_bytes(path.read_bytes()+b'changed')
     with pytest.raises(ValueError,match='hash|artifact|reference'):mod.evaluate_condition(source,out,'raw',raw)
+
+
+def test_model_free_report_figures_and_actual_notebook_cells(planning_prepared,monkeypatch):
+    import ast,json,subprocess,sys,types
+    from pathlib import Path
+    notebook=Path(__file__).resolve().parents[1]/'notebooks/ranking_planning_colab.ipynb'
+    assert notebook.is_file(), 'planning notebook missing'
+    n=json.loads(notebook.read_text())
+    for c in n['cells']:
+        if c['cell_type']=='code':compile(''.join(c['source']),'<cell>','exec')
+    mod,source,out,config,manifest,env,encode=planning_prepared
+    for role in ('raw','adapted'):
+        runtime=SyntheticRuntime(mod,out,config,manifest,role,env,encode)
+        mod.evaluate_condition(source,out,role,runtime)
+    r=mod.report(source,out,render=True)
+    assert len(list(out.glob('*.pdf')))==7
+    assert (out/'goal_3_trajectories.png').stat().st_size>1000
+    (out/'goal_3_trajectories.png').unlink();mod.report(source,out)
+    context=dict(sys=sys,SOURCE_RUN=source,OUTPUT=out,REPO=Path.cwd(),json=json,time=__import__('time'),VIDEOS=False)
+    nodes=[a for a in ast.parse(''.join(n['cells'][3]['source'])).body if isinstance(a,ast.FunctionDef) and a.name=='command']
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'<command>','exec'),context)
+    assert '--world-model-checkpoint' not in context['command']('report')
+    with pytest.raises(ValueError,match='condition'):context['command']('evaluate')
+    images=[]
+    class Image:
+        def __init__(self,filename):assert Path(filename).is_file();images.append(filename)
+    ip=types.ModuleType('IPython');disp=types.ModuleType('IPython.display')
+    disp.display=lambda image:None;disp.Image=Image
+    monkeypatch.setitem(sys.modules,'IPython',ip);monkeypatch.setitem(sys.modules,'IPython.display',disp)
+    context['shell']=lambda cmd,cwd=None:subprocess.run(list(map(str,cmd)),cwd=cwd,check=True)
+    for i in (13,15):exec(''.join(n['cells'][i]['source']),context)
+    assert len(images)==7 and r['summary']['overall']['both_success']==32
