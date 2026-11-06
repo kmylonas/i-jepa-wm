@@ -24,7 +24,8 @@ offered fitting nodes/references and other sampled starts. Goal0 is labelled
 seen; others must match source reserved goals. No outcome-based task selection.
 
 All48 cases are paired across raw/adapted, total96 episodes. Same encoder,
-world model, CEM samples/seeds, reset and success criterion. Use existing fixed
+world model, CEM random seeds, reset and success criterion. Later candidate
+values may differ as the costs select different elites. Use existing fixed
 world model SHA b0f3ccfefe0534d9f51af2d0767619913f48d0c323ebb323f0bcd4b800206c3f,
 encoder SHA3f37d8a7572e25c2dce9a3072c2fd8cd55ce32dc6edb92a8996b0e4cb140bf98,
 renderer commit0a9492fa12044b852ae9e001cc74604b79c8bb0c, fp32.
