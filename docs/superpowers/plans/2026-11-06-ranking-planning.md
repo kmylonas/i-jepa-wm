@@ -33,8 +33,8 @@
 
 **Interfaces:** `load_ranking_source(root)` returns frozen adapter/config/design/snapshot; `make_manifest(design,starts_per_goal=8)`; `summarize(raw,adapted)`.
 
-- [ ] Write failing tests for old-code source loading/corruption, six-goal domain/distance/holdout pairing, summaries/efficiency/empty subsets.
-- [ ] Implement, verify GREEN, commit.
+- [x] Write failing tests for old-code source loading/corruption, six-goal domain/distance/holdout pairing, summaries/efficiency/empty subsets.
+- [x] Implement, verify GREEN, commit.
 
 ### Task 2: Per-goal runtime and resumable evaluation
 
@@ -42,16 +42,16 @@
 
 **Interfaces:** `prepare(source,output)`, `prepare_goals(source,output,runtime)`, `evaluate_condition(source,output,condition,runtime,limit=None)`, `report(source,output,render=True)`; `PlanningRuntime(PilotRuntime).run_case(case,target,metric=None)`; CLI prepare/goals/evaluate/report.
 
-- [ ] Add failing tiny CEM/model tests proving shifted references, identical seeded action proposals and raw histories, and signed synthetic orchestration interruption/resume/companions.
-- [ ] Implement explicit terminal scoring, primitive capture and journal, immutable goal references and episode hashes, source/runtime validation.
-- [ ] Verify focused tests GREEN; commit.
+- [x] Add failing tiny CEM/model tests proving shifted references, identical seeded action proposals and raw histories, and signed synthetic orchestration interruption/resume/companions.
+- [x] Implement explicit terminal scoring, primitive capture and journal, immutable goal references and episode hashes, source/runtime validation.
+- [x] Verify focused tests GREEN; commit.
 
 ### Task 3: Figures and runnable notebook
 
 **Files:** New `src/mylonas_ijepa_wm/ranking_planning_plots.py`, `notebooks/ranking_planning_colab.ipynb`, `docs/ranking_planning.md`; extend tests.
 
-- [ ] Add failing plot/model-free-report and actual notebook reporting/command tests.
-- [ ] Implement coverage, paired per-goal trajectories, outcome/efficiency figures; notebook initial paired timing then reuse completed cases, all reports.
-- [ ] Verify synthetic full48-case flow and figures, full suite, fresh final review. Fix substantive findings via regression tests. Pin notebook, publish same branch and verify remote/clean tree. Actual GPU planning remains pending user run.
+- [x] Add failing plot/model-free-report and actual notebook reporting/command tests.
+- [x] Implement coverage, paired per-goal trajectories, outcome/efficiency figures; notebook initial paired timing then reuse completed cases, all reports.
+- [x] Verify synthetic full48-case flow and figures, full suite, fresh final review. Fix substantive findings via regression tests. Pin notebook, publish same branch and verify remote/clean tree. Actual GPU planning remains pending user run.
 
 User requested this benchmark and the established same-worktree Colab workflow. Execute natively without another approval round.
