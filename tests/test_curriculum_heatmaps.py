@@ -23,7 +23,7 @@ class GridRuntime:
     def __init__(self):
         self.device = torch.device("cpu")
         self.calls = 0
-        self.env = SimpleNamespace(env=SimpleNamespace(border_padding=7.4, img_size=65),
+        self.env = SimpleNamespace(env=SimpleNamespace(border_padding=7.4, img_size=65, wall_config=SimpleNamespace(border_wall_loc=5)),
             reset=lambda *a, **kw: None,
             _render_at=lambda position: np.full((2, 2, 3), int(position[1]), np.uint8))
 
@@ -38,9 +38,9 @@ def test_grid_is_cached_float32_fixed_points_and_rejects_changed_bytes(tmp_path)
     runtime = GridRuntime()
     signature = {"experiment": "test", "precision": "fp32", "goal_sha256": "goal"}
     grid = mod.prepare_grid(runtime, tmp_path, torch.zeros(1, 4), signature)
-    assert grid["tokens"].shape == (176, 1, 4) and grid["tokens"].dtype == torch.float32
+    assert grid["tokens"].shape == (242, 1, 4) and grid["tokens"].dtype == torch.float32
     assert grid["points"][0].tolist() == [40., 8.]
-    assert grid["points"][-1].tolist() == [54., 50.]
+    assert np.allclose(grid["points"][-1].tolist(), [59.999, 50.])
     assert runtime.calls == 1
     second = mod.prepare_grid(runtime, tmp_path, torch.zeros(1, 4), signature)
     assert runtime.calls == 1 and torch.equal(second["raw_costs"], grid["raw_costs"])
@@ -111,3 +111,19 @@ def test_partial_report_has_unavailable_cells_and_renders(curriculum_sources, tm
     assert all(value is None for value in report["raw"].values())
     assert report["branches"]["original"]["versions"]["3"]["band_3"] is None
     assert (curriculum.root / "curriculum_matrix.png").is_file()
+
+
+def test_legacy_grid_stays_readable_without_reencoding(tmp_path):
+    from src.mylonas_ijepa_wm.curriculum_protocol import digest,write_json
+    from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256,save_tensors
+    mod=heatmaps()
+    grid=mod.prepare_grid(GridRuntime(),tmp_path,torch.zeros(1,4),{'test':'legacy'})
+    keep=grid['points'][:,0]<=54
+    for key in ('tokens','points','raw_costs'):grid[key]=grid[key][keep]
+    for key in ('domain','sha256','display_max'):grid.pop(key,None)
+    path=tmp_path/'cache/grid.pt';save_tensors(path,grid)
+    write_json(tmp_path/'cache/grid.json',dict(signature={'test':'legacy'},
+        points_digest=digest(grid['points'].tolist()),sha256=file_sha256(path),display_max=2500.))
+    loaded=mod.load_grid(tmp_path,{'test':'legacy'})
+    assert loaded['points'].shape==(176,2)
+    assert loaded['points'][-1].tolist()==[54.,50.]

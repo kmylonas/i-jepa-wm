@@ -27,7 +27,8 @@ def test_saved_audit_locates_exact_goal_and_preserves_existing_artifacts(curricu
     saved = module().load_saved(curriculum.root, curriculum_sources[1])
     checks = saved['report']
     assert checks['goal_position'] == [50., 42.]
-    assert checks['goal_grid_index'] == 141
+    grid = torch.load(curriculum.root / 'cache/grid.pt', weights_only=True)
+    assert grid['points'][checks['goal_grid_index']].tolist() == [50.,42.]
     assert checks['goal_copy']['mse'] == 0
     assert checks['grid_target_copy']['mse'] == 0
     assert checks['goal_self']['mse'] == 0

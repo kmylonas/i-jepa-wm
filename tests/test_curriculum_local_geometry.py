@@ -6,6 +6,7 @@ from collections import Counter
 import numpy as np
 import pytest
 import torch
+from test_curriculum_multiband import curriculum_sources
 
 
 def geometry():
@@ -79,3 +80,36 @@ def test_pair_selection_spreads_across_episodes_without_discarding_rank_failures
     assert len(result['selected'])==2
     assert {p['episode'] for p in result['selected']}=={0,1}
     assert result['geometrically_eligible']==6
+
+
+def test_read_only_audit_renders_real_probes_and_preserves_experiment(curriculum_sources,tmp_path):
+    from types import SimpleNamespace
+    from test_curriculum_multiband import no_anchor_prepared, TinyRuntime, baseline
+    from test_curriculum_clean_pair_ablation import file_hashes
+    from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256
+    free=no_anchor_prepared(curriculum_sources,tmp_path)
+    baseline(free);free.initial('clean',TinyRuntime(free,'clean'))
+    before={str(p):file_hashes(p) for p in (*curriculum_sources,free.root)}
+    env=SimpleNamespace(env=SimpleNamespace(img_size=65,border_padding=7.4,
+        wall_config=SimpleNamespace(border_wall_loc=5)),
+        reset=lambda *a,**k:None,
+        _render_at=lambda xy:np.broadcast_to(np.asarray(xy,dtype=np.float32)[None,None,:],(2,2,2)).copy())
+    def encode(frames):
+        return torch.as_tensor(frames[:,0,0,:]).repeat(1,2)[:,None,:]
+    name='src.mylonas_ijepa_wm.curriculum_local_audit'
+    assert importlib.util.find_spec(name),'local audit module missing'
+    mod=importlib.import_module(name)
+    out=tmp_path/'local-audit'
+    result=mod.audit(free,out,env,encode,pair_count=3,batch_size=2)
+    assert result['primitive_interactions']==0 and result['selected_pairs']>0
+    assert result['grid']['x_max']>59.9
+    assert result['grid']['raw'][0]==832.  # (40² + 8²)/2 from fresh encoded coordinates
+    assert result['sampling']['total_pair_draws']==4
+    assert all(row['raw']['flat_profiles']==0 for row in result['offset_summary'])
+    assert result['endpoint_reencoding']['pairs']==result['selected_pairs']
+    assert before=={str(p):file_hashes(p) for p in (*curriculum_sources,free.root)}
+    assert (out/'probes.json').is_file() and (out/'report.json').is_file()
+    with pytest.raises(ValueError,match='separate|source'):
+        mod.audit(free,free.root/'audit',env,encode)
+    with pytest.raises(ValueError,match='empty|new'):
+        mod.audit(free,out,env,encode)

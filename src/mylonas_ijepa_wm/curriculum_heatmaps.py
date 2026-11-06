@@ -14,8 +14,22 @@ from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256, save_tensors
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import BANDS, BOUNDS, RECIPES, read
 
 
-def points():
-    return torch.tensor([(x, y) for y in range(8, 51, 2) for x in range(40, 55, 2)], dtype=torch.float32)
+def physical_bounds(env):
+    """Rollout border walls, distinct from the more conservative reset bounds."""
+    config = getattr(env, 'wall_config', None)
+    if config is None:
+        return float(env.border_padding)+.001, float(env.img_size-1-env.border_padding)-.001
+    return float(config.border_wall_loc-1)+.001, float(env.img_size-config.border_wall_loc)-.001
+
+
+def points(right_edge=54.):
+    # No-argument geometry is the immutable legacy cache layout.
+    if not np.isfinite(right_edge) or not 54 <= right_edge <= 64:
+        raise ValueError('invalid right diagnostic boundary')
+    xs = np.arange(40, right_edge, 2).tolist()
+    if not xs or abs(xs[-1]-right_edge)>1e-5:
+        xs.append(right_edge)
+    return torch.tensor([(x,y) for y in range(8,51,2) for x in xs],dtype=torch.float32)
 
 
 def _safe(root):
@@ -29,15 +43,19 @@ def load_grid(output, signature):
     root = _safe(output)
     path, meta_path = root / "cache/grid.pt", root / "cache/grid.json"
     meta = read(meta_path)
-    if meta.get("signature") != signature or meta.get("points_digest") != digest(points().tolist()):
+    domain = meta.get('domain')
+    locations = points(domain['right_edge']) if domain else points()
+    if (domain and domain.get('kind') != 'physical_right_v1'
+            or meta.get("signature") != signature or meta.get("points_digest") != digest(locations.tolist())):
         raise ValueError("grid signature/provenance differs")
     if meta.get("sha256") != file_sha256(path):
         raise ValueError("diagnostic grid cache hash differs")
     grid = torch.load(path, map_location="cpu", weights_only=True)
     tokens, raw, goal = grid["tokens"], grid["raw_costs"], grid["goal"]
-    if (grid.get("signature") != signature or not torch.equal(grid["points"], points())
-            or tokens.dtype != torch.float32 or tokens.ndim != 3 or len(tokens) != 176
-            or goal.shape != tokens.shape[1:] or raw.shape != (176,)
+    if (grid.get("signature") != signature or grid.get('domain') != domain
+            or not torch.equal(grid["points"], locations)
+            or tokens.dtype != torch.float32 or tokens.ndim != 3 or len(tokens) != len(locations)
+            or goal.shape != tokens.shape[1:] or raw.shape != (len(locations),)
             or not all(torch.isfinite(tensor).all() for tensor in (tokens, raw, goal))
             or float(raw.max()) <= 0 or meta.get("display_max") != float(raw.max())):
         raise ValueError("diagnostic grid shape/values/provenance differs")
@@ -54,10 +72,9 @@ def prepare_grid(runtime, output, goal, signature):
             raise ValueError("grid goal differs from shared frozen target")
         return grid
     runtime.env.reset(0, layout=[32, 30], start=[44, 34], goal=[50, 42])
-    lower = float(runtime.env.env.border_padding)
-    upper = float(runtime.env.env.img_size-1-lower)
-    locations = points()
-    if float(locations.min()) < lower or float(locations.max()) > upper:
+    lower, upper = physical_bounds(runtime.env.env)
+    locations = points(upper)
+    if float(locations.min()) < lower-1e-5 or float(locations.max()) > upper+1e-5:
         raise ValueError("diagnostic grid exceeds valid pinned environment reset bounds")
     frames = np.stack([runtime.env._render_at(point) for point in locations])
     # PilotRuntime.encode_frames chunks its encoder calls to the fixed batch size.
@@ -69,9 +86,10 @@ def prepare_grid(runtime, output, goal, signature):
     if not torch.isfinite(raw).all() or float(raw.max()) <= 0:
         raise ValueError("invalid diagnostic raw scale")
     path = root / "cache/grid.pt"
-    save_tensors(path, dict(signature=signature, points=locations, tokens=tokens, goal=goal, raw_costs=raw))
+    domain = dict(kind='physical_right_v1',right_edge=upper)
+    save_tensors(path, dict(signature=signature,domain=domain, points=locations, tokens=tokens, goal=goal, raw_costs=raw))
     write_json(root / "cache/grid.json", dict(signature=signature, points_digest=digest(locations.tolist()),
-        sha256=file_sha256(path), display_max=float(raw.max()), primitive_interactions=0,
+        domain=domain,sha256=file_sha256(path), display_max=float(raw.max()), primitive_interactions=0,
         note="Real-image rendering probes; excluded from training and progression decisions."))
     return load_grid(root, signature)
 
@@ -114,7 +132,8 @@ def checkpoint_heatmap(output, recipe, version, adapter, replay_positions, signa
     for axis, title, values, is_difference in zip(axes,
             ("Raw latent MSE", "Adapted latent MSE", "Adapted minus raw"),
             (raw.numpy(), adapted.numpy(), difference.numpy()), (False, False, True)):
-        graphic = axis.pcolormesh(np.arange(40, 55, 2), np.arange(8, 51, 2), values.reshape(22, 8),
+        xs, ys = (np.unique(grid['points'][:,i].numpy()) for i in (0,1))
+        graphic = axis.pcolormesh(xs, ys, values.reshape(len(ys),len(xs)),
             shading="nearest", cmap="RdBu_r" if is_difference else "viridis",
             vmin=-limit if is_difference else 0, vmax=limit)
         for boundary in (8, 14, 22, 30, 36):
@@ -125,7 +144,7 @@ def checkpoint_heatmap(output, recipe, version, adapter, replay_positions, signa
         if len(positions):
             axis.scatter(positions[:, 0], positions[:, 1], s=2, color="white", alpha=.12, edgecolors="none")
         axis.scatter(50, 42, marker="*", s=100, c="#f97316", edgecolors="black", linewidths=.5)
-        axis.set(title=title, xlabel="x", ylabel="y", xlim=(39, 55), ylim=(7, 51), aspect="equal")
+        axis.set(title=title, xlabel="x", ylabel="y", xlim=(39, float(xs[-1])+1), ylim=(7, 51), aspect="equal")
         extension = "both" if is_difference else "max" if np.max(values) > limit else "neither"
         figure.colorbar(graphic, ax=axis, shrink=.8, extend=extension)
     figure.suptitle(f"{recipe}: adapter v{version} — fixed real-image grid\n"
@@ -137,9 +156,9 @@ def checkpoint_heatmap(output, recipe, version, adapter, replay_positions, signa
     write_json(data_path, data)
     write_json(commit_path, dict(inputs=expected, data_sha256=file_sha256(data_path), image_sha256=file_sha256(image_path)))
     print(f"heatmap {recipe}/v{version}: max adapted={data['adapted_max']:.5g}; "
-          f"above shared display scale={data['saturated_adapted_points']}/176; "
+          f"above shared display scale={data['saturated_adapted_points']}/{len(raw)}; "
           f"difference range=[{data['difference_min']:.5g},{data['difference_max']:.5g}], "
-          f"outside difference scale={data['saturated_difference_points']}/176", flush=True)
+          f"outside difference scale={data['saturated_difference_points']}/{len(raw)}", flush=True)
     return data
 
 
