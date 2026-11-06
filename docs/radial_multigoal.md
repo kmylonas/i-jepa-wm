@@ -48,3 +48,16 @@ hashes/source/config before reuse; partial steps require a fresh run.
 
 Local verification uses synthetic encoding and actual fitting/evaluation/
 notebook report code. Scientific transfer and GPU runtime await the user run.
+
+## Verification
+
+The notebook pins production source to
+`b1f3e57a68a78530be775879b085772b48ff1050`. The final full suite passed:
+472 tests, 16 subtests and four existing warnings. The 16-goal synthetic
+workflow exercised the real training/evaluation/report CLI, actual notebook
+report cells, all 19 PNG/PDF figures, and regeneration after cache deletion.
+Synthetic counts were 115 admitted nodes, 114 single-reference pairs and
+6,232 multi-goal pairs; actual rendering may change image-alias exclusions.
+A fresh review found one empty-directory handling defect; two regression
+tests reproduced it and passed after the fix, followed by the green full
+suite. No scientific leakage or metric correctness findings remained.
