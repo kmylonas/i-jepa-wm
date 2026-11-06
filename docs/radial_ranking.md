@@ -51,3 +51,15 @@ resume with the same local cache; interrupted uncommitted fits can restart
 deterministically from their incoming checkpoint. A lost Colab runtime loses
 the local feature cache; rerun setup for a fresh timestamped experiment while
 preserving previous Drive results. No planning, actions or world-model loads.
+
+## Verification
+
+The published notebook pins production code to
+`ed8dd157a052e3c39602c448d60f87cc6cb568e2`. Local verification:437tests and
+16subtests passed (4existing warnings), all four synthetic stages and notebook
+result cells ran, and the pinned renderer was checked at representative physical
+positions. Actual GPU encoding, Colab dependencies, runtime/memory use and
+scientific outcomes remain for the Colab run. Other-goal transfer and planning
+performance are outside this experiment. Training-pair ties count as ranking
+failures but are not yet reported separately from reversed pairs; probe curves
+do report ties.

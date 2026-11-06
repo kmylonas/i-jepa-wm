@@ -29,24 +29,24 @@ stage runner, plots and staged Colab. Existing trajectory experiments untouched.
 **Files:** radial_geometry.py, radial_training.py, tests/test_radial_ranking.py.
 **Interfaces:** make_design(bounds), training_pairs(radii), fit(tokens,radii,goal,...).
 
-- [ ] Add RED tests for stage populations, clipping, fixed holdouts/offset cohorts, cross-ray pair rules and actual optimization with no probe inputs.
-- [ ] Implement deterministic coordinate design, heldout radii/rays/segments, and standalone ranking-only fitter retaining the adapter architecture.
-- [ ] Run focused tests GREEN; commit.
+- [x] Add RED tests for stage populations, clipping, fixed holdouts/offset cohorts, cross-ray pair rules and actual optimization with no probe inputs.
+- [x] Implement deterministic coordinate design, heldout radii/rays/segments, and standalone ranking-only fitter retaining the adapter architecture.
+- [x] Run focused tests GREEN; commit.
 
 ### Task 2: Cached preparation, stage runner and plotting
 
 **Files:** radial_experiment.py, radial_plots.py; extend radial tests.
 **Interfaces:** prepare(output,cache,env,encode,signature); stage(output,cache,index,device); renderer/encoder-only CLI.
 
-- [ ] Write RED integration tests for fresh reference, source/output isolation, cache/checkpoint hash rejection, cumulative warm starts and no heldout optimizer exposure.
-- [ ] Implement streaming cache, immutable config, fresh goal, train-only loading, stage lineage and numeric summaries stratified by radius/exposure; plot after each stage.
-- [ ] Run focused tests GREEN; execute all four stages/plots on synthetic tokens and real renderer design; commit.
+- [x] Write RED integration tests for fresh reference, source/output isolation, cache/checkpoint hash rejection, cumulative warm starts and no heldout optimizer exposure.
+- [x] Implement streaming cache, immutable config, fresh goal, train-only loading, stage lineage and numeric summaries stratified by radius/exposure; plot after each stage.
+- [x] Run focused tests GREEN; execute all four stages/plots on synthetic tokens and real renderer design; commit.
 
 ### Task 3: Staged GPU Colab and publication
 
 **Files:** notebooks/radial_ranking_colab.ipynb, docs/radial_ranking.md.
 **Interfaces:** pinned setup -> prepare once -> four stage calls and immediate figures -> final comparisons.
 
-- [ ] Build notebook with no prior-experiment prerequisites; compile and execute result/display cells on synthetic workflow.
-- [ ] Run full suite; commit; one fresh final review; one Important/Critical RED→GREEN fix pass and suite if required.
-- [ ] Pin tested production code; push same branch; verify remote HEAD/clean status; mark actual GPU results pending.
+- [x] Build notebook with no prior-experiment prerequisites; compile and execute result/display cells on synthetic workflow.
+- [x] Run full suite; commit; one fresh final review; one Important/Critical RED→GREEN fix pass and suite if required.
+- [x] Pin tested production code; push same branch; verify remote HEAD/clean status; mark actual GPU results pending.
