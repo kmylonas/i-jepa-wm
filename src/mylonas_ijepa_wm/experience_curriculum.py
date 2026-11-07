@@ -307,6 +307,7 @@ def main(argv=None):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int)
     parser.add_argument("--starts-per-goal", type=int, default=6)
+    parser.add_argument("--actions-per-plan", type=int, choices=range(1, PLANNING["planning_horizon"] + 1))
     parser.add_argument("--labels", choices=("progress", "temporal"), default="progress")
     parser.add_argument("--sampling", choices=("radial", "half-square"), default="radial")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
@@ -333,6 +334,8 @@ def main(argv=None):
     if snapshot["fitting_signature"]["encoder_sha256"] != EXPECTED_ENCODER:
         raise ValueError("encoder differs from handcrafted benchmark")
     manifest = build_manifest(design, args.starts_per_goal)
+    if args.actions_per_plan is not None:
+        manifest["planning"]["actions_per_plan"] = args.actions_per_plan
     if half_square:
         kind = "experience_temporal_half_square_v1"
     else:

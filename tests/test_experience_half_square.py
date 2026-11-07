@@ -34,3 +34,30 @@ def test_full_right_room_filter_keeps_far_reversals_only_in_successes():
                   frame_sha256=[_frame_hash(frames[-1])])
     assert half.filter_steps(raw, case, design, 8)[0] == [0, 1]
     assert half.filter_steps(dict(raw, success=False), case, design, 8)[0] == []
+
+
+def test_execution_stride_changes_planning_only(monkeypatch, tmp_path):
+    from src.mylonas_ijepa_wm import experience_curriculum as exp
+
+    points = [[50, 42], [44, 40], [53, 48], [44, 20], [50, 12], [55, 14]]
+    design = dict(points=points, train_ids=list(range(len(points))))
+    snapshot = dict(fitting_signature=dict(encoder_sha256=exp.EXPECTED_ENCODER))
+    monkeypatch.setattr(exp, "load_ranking_source", lambda _: (None, snapshot, design))
+    monkeypatch.setattr(exp, "read", lambda _: dict(fitting={}, scale=1.))
+    class Runtime:
+        def __init__(self, args, manifest):
+            self.manifest = manifest
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(exp, "PilotRuntime", Runtime)
+    monkeypatch.setattr(exp, "collect_and_fit", lambda runtime, *_args, **_kwargs: runtime.manifest)
+    result = exp.main(["stage", "--sampling", "half-square", "--labels", "temporal", "--band", "1",
+                       "--actions-per-plan", "1", "--device", "cpu", "--output-dir", str(tmp_path/"out"),
+                       "--source-run", str(tmp_path/"source"), "--encoder-checkpoint", str(tmp_path/"encoder"),
+                       "--world-model-checkpoint", str(tmp_path/"wm"), "--dino-wm-root", str(tmp_path/"dino")])
+    original = half.make_manifest(design)
+    assert original["planning"]["actions_per_plan"] == 5
+    original["planning"]["actions_per_plan"] = 1
+    assert result == original
