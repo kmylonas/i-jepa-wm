@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from src.mylonas_ijepa_wm import geodesic_radial as radial
+from src.mylonas_ijepa_wm import geodesic_square as square
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
 from src.mylonas_ijepa_wm.curriculum_protocol import digest, write_json
 from src.mylonas_ijepa_wm.curriculum_replay import load_adapter, save_adapter
@@ -19,7 +20,9 @@ TRAIN_GOALS = ((15, 15), (19, 30), (15, 46), (49, 15), (45, 30), (49, 46))
 TEST_GOALS = ((12, 23), (24, 12), (24, 31), (12, 42), (52, 23), (40, 12), (40, 31), (52, 42))
 
 
-def make_design():
+def make_design(*, geometry="radial"):
+    if geometry not in ("radial", "square"):
+        raise ValueError("unknown multigoal fitting geometry")
     points, lookup = [], {}
 
     def intern(point):
@@ -31,23 +34,29 @@ def make_design():
 
     goal_ids = [intern(g) for g in TRAIN_GOALS]
     heldout_goal_ids = [intern(g) for g in TEST_GOALS]
-    samples = []
-    for goal in TRAIN_GOALS:
-        samples.append([
-            dict(id=intern(point), band=band, distance=radial.distance(point, goal))
-            for band, radii in enumerate(radial.RADII)
-            for radius in radii
-            for _, point in radial._ring(radius, 0, goal)
-        ])
     axis = [radial.BOUNDS[0], *range(6, 60, 2), radial.BOUNDS[1]]
+    goals = (*TRAIN_GOALS, *TEST_GOALS)
+    if geometry == "square":
+        samples = [[dict(id=intern(node["point"]), band=node["band"], distance=node["distance"])
+                    for node in square.training_nodes(goal)] for goal in TRAIN_GOALS]
+    else:
+        samples = [[dict(id=intern(point), band=band, distance=radial.distance(point, goal))
+                    for band, radii in enumerate(radial.RADII)
+                    for radius in radii for _, point in radial._ring(radius, 0, goal)]
+                   for goal in TRAIN_GOALS]
     grid = [intern((x, y)) if radial.valid((x, y)) else None for y in axis for x in axis]
-    rings = [
-        [[intern(point) for _, point in radial._ring(radius, 7.5, goal)]
-         for radii in radial.RADII for radius in radii]
-        for goal in (*TRAIN_GOALS, *TEST_GOALS)
-    ]
+    if geometry == "square":
+        grid_ids = [i for i in grid if i is not None]
+        rings = [[group["ids"] for group in square.contours(points, grid_ids, goal)] for goal in goals]
+        bands = square.BANDS
+        extra = dict(geometry=geometry, spacing=square.SPACING)
+    else:
+        rings = [[[intern(point) for _, point in radial._ring(radius, 7.5, goal)]
+                  for radii in radial.RADII for radius in radii] for goal in goals]
+        bands = BANDS
+        extra = {}
     return dict(points=points, goal_ids=goal_ids, heldout_goal_ids=heldout_goal_ids, samples=samples,
-                axis=axis, grid=grid, rings=rings, bands=[list(b) for b in BANDS], layout=list(radial.LAYOUT))
+                axis=axis, grid=grid, rings=rings, bands=[list(b) for b in bands], layout=list(radial.LAYOUT), **extra)
 
 
 def population(design, hashes, stage):
@@ -94,15 +103,16 @@ def _local(truth, scores, edges, tolerance):
                 uphill=float((delta < -tolerance).mean()))
 
 
-def _goal_report(design, goal, truth, euclidean, raw, adapted, mask, edges, index, outer):
+def _goal_report(design, goal, truth, extent, raw, adapted, mask, edges, index, outer):
     points = np.asarray(design["points"])
     # Use only the two rooms here. Doorway pixels remain in the full-grid metrics.
     opposite = points[:, 0] > radial.WALL_RIGHT if points[goal, 0] < radial.WALL_LEFT else points[:, 0] < radial.WALL_LEFT
     ids = np.asarray([i for i in design["grid"] if i is not None and mask[i]], dtype=int)
-    cohorts = dict(full_map=[ids], within_radius=[ids[euclidean[ids] <= outer + radial.TIE]],
-                   beyond_radius=[ids[euclidean[ids] > outer + radial.TIE]],
-                   opposite_room=[ids[opposite[ids]]],
-                   same_radius=[[i for i in ring if mask[i]] for ring in design["rings"][index]])
+    within, beyond, same = (("within_square", "beyond_square", "same_extent") if design.get("geometry") == "square"
+                            else ("within_radius", "beyond_radius", "same_radius"))
+    cohorts = {"full_map": [ids], within: [ids[extent[ids] <= outer + radial.TIE]],
+               beyond: [ids[extent[ids] > outer + radial.TIE]], "opposite_room": [ids[opposite[ids]]],
+               same: [[i for i in ring if mask[i]] for ring in design["rings"][index]]}
     metrics = {
         name: dict(raw=radial._metric(truth, raw, group), adapted=radial._metric(truth, adapted, group))
         for name, group in cohorts.items()
@@ -118,10 +128,12 @@ def _goal_report(design, goal, truth, euclidean, raw, adapted, mask, edges, inde
                 metrics=metrics, grid_costs=[None if i is None else float(adapted[i]) for i in grid])
 
 
-def run(output, env, encode, device, signature, *, updates=500):
+def run(output, env, encode, device, signature, *, updates=500, geometry="radial"):
     """Fit and evaluate cumulative, goal-balanced geodesic ranking checkpoints."""
-    design = make_design()
-    config = dict(kind="geodesic_multigoal_v1", design=digest(design), runtime=signature, updates=updates)
+    design = make_design(geometry=geometry)
+    square_grid = geometry == "square"
+    kind = "geodesic_multigoal_square_v1" if square_grid else "geodesic_multigoal_v1"
+    config = dict(kind=kind, design=digest(design), runtime=signature, updates=updates)
     path = output / "config.json"
     if path.exists() and read(path) != config:
         raise ValueError("multigoal run configuration changed")
@@ -132,9 +144,11 @@ def run(output, env, encode, device, signature, *, updates=500):
     tokens, hashes = _encode(env, encode, points)
     raw = _scores(None, tokens, goals, device)
     truth = np.asarray([[radial.distance(p, points[g]) for p in points] for g in goals])
-    euclidean = np.linalg.norm(points[None, :, :] - points[goals, None, :], axis=2)
+    offsets = points[None, :, :] - points[goals, None, :]
+    extent = np.abs(offsets).max(axis=2) if square_grid else np.linalg.norm(offsets, axis=2)
 
-    complete_population = population(design, hashes, len(BANDS) - 1)
+    bands = design["bands"]
+    complete_population = population(design, hashes, len(bands) - 1)
     exposed = {hashes[i] for triplet in complete_population for i in triplet} | {hashes[i] for i in goals}
     mask = np.asarray([h not in exposed for h in hashes])
     n = len(design["axis"])
@@ -145,10 +159,9 @@ def run(output, env, encode, device, signature, *, updates=500):
 
     reports = []
     previous, previous_sha = None, None
-    for stage, (_, outer) in enumerate(BANDS):
-        triples = complete_population if stage == len(BANDS) - 1 else population(design, hashes, stage)
+    for stage, (_, outer) in enumerate(bands):
+        triples = complete_population if stage == len(bands) - 1 else population(design, hashes, stage)
         ids = sorted({i for triplet in triples for i in triplet})
-        remap = {i: j for j, i in enumerate(ids)}
         folder = output / f"band_{stage + 1}"
         checkpoint, marker = folder / "adapter.pt", folder / "complete.json"
         inputs = dict(runtime_id=digest(config), incoming=previous_sha, triplets=digest(triples))
@@ -164,7 +177,9 @@ def run(output, env, encode, device, signature, *, updates=500):
             positive = scale_values[scale_values > 0]
             if not len(positive):
                 raise ValueError("training raw MSE scale is zero")
-            adapter, training = fit(tokens[ids], [[remap[i] for i in triple] for triple in triples],
+            remap = np.full(len(points), -1, dtype=np.int32)
+            remap[ids] = np.arange(len(ids), dtype=np.int32)
+            adapter, training = fit(tokens[ids], remap[np.asarray(triples, dtype=np.int32)],
                                     float(np.median(positive)), initial_adapter=previous, seed=stage,
                                     updates=updates, batch_size=16, device=device,
                                     progress=lambda row: print(row, flush=True))
@@ -172,17 +187,18 @@ def run(output, env, encode, device, signature, *, updates=500):
             write_json(marker, dict(inputs=inputs, sha256=file_sha256(checkpoint)))
         adapted = _scores(adapter, tokens, goals, device)
         previous, previous_sha = adapter, file_sha256(checkpoint)
-        by_goal = [_goal_report(design, g, truth[j], euclidean[j], raw[j], adapted[j], mask, edges, j, outer)
+        by_goal = [_goal_report(design, g, truth[j], extent[j], raw[j], adapted[j], mask, edges, j, outer)
                    for j, g in enumerate(goals)]
         counts = dict(zip(goals, [0] * len(goals)))
         for g, _, _ in triples:
             counts[g] += 1
-        report = dict(band=stage + 1, outer_radius=outer, pairs=len(triples),
+        size = "half_width" if square_grid else "outer_radius"
+        report = dict(band=stage + 1, pairs=len(triples),
                       pairs_per_training_goal=[counts[g] for g in design["goal_ids"]],
-                      train_accuracy=training["probe_after"]["rank_accuracy"], by_goal=by_goal)
+                      train_accuracy=training["probe_after"]["rank_accuracy"], by_goal=by_goal, **{size: outer})
         write_json(folder / "report.json", report)
         reports.append(report)
-        print(f"Band {stage + 1} R={outer}: {len(triples)} triples across "
+        print(f"Band {stage + 1} {'half-width' if square_grid else 'R'}={outer}: {len(triples)} triples across "
               f"{sum(counts[g] > 0 for g in design['goal_ids'])} training goals", flush=True)
 
     result = dict(goals=[points[g].tolist() for g in goals], seen_goals=len(TRAIN_GOALS),
