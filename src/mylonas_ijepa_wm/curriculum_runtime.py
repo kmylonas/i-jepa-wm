@@ -1,10 +1,13 @@
 """Frozen model runtime and real-observation capture for the pilot."""
 
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -25,11 +28,22 @@ DINO_COMMIT = "0a9492fa12044b852ae9e001cc74604b79c8bb0c"
 
 
 def file_sha256(path):
-    result = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
-            result.update(block)
-    return result.hexdigest()
+    path = Path(path)
+    for delay in (1, 3, None):
+        result = hashlib.sha256()
+        try:
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                    result.update(block)
+            return result.hexdigest()
+        except OSError as error:
+            if error.errno != errno.EIO:
+                raise
+            if delay is None:
+                raise OSError(errno.EIO, "SHA-256 file read failed after three attempts", str(path)) from error
+            print(f"I/O error reading {path}; retrying SHA-256 from the beginning in {delay}s",
+                  file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def source_digest(root):
