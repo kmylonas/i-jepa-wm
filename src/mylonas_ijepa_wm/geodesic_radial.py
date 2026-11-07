@@ -70,10 +70,10 @@ def distance(point, goal=GOAL):
     return float(lengths[0, 1])
 
 
-def _ring(radius, offset):
+def _ring(radius, offset, goal=GOAL):
     for angle in range(0, 360, 15):
         theta = np.deg2rad(angle + offset)
-        point = (np.asarray(GOAL) + radius * np.array([np.cos(theta), np.sin(theta)])).astype(np.float32)
+        point = (np.asarray(goal) + radius * np.array([np.cos(theta), np.sin(theta)])).astype(np.float32)
         if valid(point):
             yield angle + offset, point.tolist()
 
@@ -207,8 +207,8 @@ def run(output, env, encode, device, signature, *, updates=500):
     return result
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, runner=run):
+    parser = argparse.ArgumentParser(description=runner.__doc__ or __doc__)
     for field in ("output-dir", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
@@ -230,7 +230,7 @@ def main(argv=None):
     env = WallAdapter(EnvironmentConfig(env="wall", wall_layouts=[list(LAYOUT)],
                                         dino_wm_root=str(args.dino_wm_root)), 100)
     try:
-        return run(output, env, lambda frames: PilotRuntime.encode_frames(runtime, frames), device, signature)
+        return runner(output, env, lambda frames: PilotRuntime.encode_frames(runtime, frames), device, signature)
     finally:
         env.close()
 
