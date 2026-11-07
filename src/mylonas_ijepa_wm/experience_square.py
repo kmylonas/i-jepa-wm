@@ -27,16 +27,17 @@ def _room(x):
     return "left" if x < wall.WALL_LEFT else "right" if x > wall.WALL_RIGHT else "door"
 
 
-def _rectangles(goal, inner, outer):
+def _rectangles(goal, inner, outer, *, regions=None):
     """Non-overlapping legal portions of the shell as axis-aligned rectangles."""
     x, y = goal
     shell = [(x - outer, x - inner, y - outer, y + outer),
              (x + inner, x + outer, y - outer, y + outer),
              (x - inner, x + inner, y - outer, y - inner),
              (x - inner, x + inner, y + inner, y + outer)]
-    regions = [(SAFE_LOW, wall.WALL_LEFT, SAFE_LOW, SAFE_HIGH),
-               (wall.WALL_RIGHT, SAFE_HIGH, SAFE_LOW, SAFE_HIGH),
-               (wall.WALL_LEFT, wall.WALL_RIGHT, wall.DOOR_LOW, wall.DOOR_HIGH)]
+    if regions is None:
+        regions = [(SAFE_LOW, wall.WALL_LEFT, SAFE_LOW, SAFE_HIGH),
+                   (wall.WALL_RIGHT, SAFE_HIGH, SAFE_LOW, SAFE_HIGH),
+                   (wall.WALL_LEFT, wall.WALL_RIGHT, wall.DOOR_LOW, wall.DOOR_HIGH)]
     rectangles = []
     for x0, x1, y0, y1 in shell:
         for a, b, c, d in regions:

@@ -101,10 +101,10 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
         probe_before=before,probe_after=after,history=history)
 
 
-def ordinal_rows(points,goals,raw,costs,heldout,edges):
+def ordinal_rows(points,goals,raw,costs,heldout,edges,*,radius=34):
     # Reuse the exact previous cohort and adjacent-edge convention, retaining
     # ordinal fields only. Ranking costs are never interpreted as distances.
-    measured=measure(points,goals,raw,costs,34,1,heldout,edges);rows=[]
+    measured=measure(points,goals,raw,costs,radius,1,heldout,edges);rows=[]
     for row in measured:
         common=np.asarray(row['common_mask']);mask=common&np.asarray(heldout,dtype=bool)
         ids=np.flatnonzero(mask);truth=np.asarray(row['true_distances'])

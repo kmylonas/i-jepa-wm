@@ -23,9 +23,7 @@ SEED = 20261107
 PAIR_CAP = 8
 
 
-def make_manifest(design, starts_per_goal=6):
-    if starts_per_goal < 1:
-        raise ValueError("need at least one start per goal and band")
+def _goal_ids(design):
     points = np.asarray(design["points"])
     candidates = np.asarray(design["train_ids"])
     candidate_xy = points[candidates]
@@ -36,6 +34,14 @@ def make_manifest(design, starts_per_goal=6):
     for anchor in GOAL_ANCHORS:
         order = candidates[np.argsort(np.linalg.norm(points[candidates] - anchor, axis=1), kind="stable")]
         goals.append(next(int(i) for i in order if i not in goals))
+    return goals
+
+
+def make_manifest(design, starts_per_goal=6):
+    if starts_per_goal < 1:
+        raise ValueError("need at least one start per goal and band")
+    points = np.asarray(design["points"])
+    goals = _goal_ids(design)
     rng = np.random.default_rng(SEED)
     stages, used = [], []
     for band, (lo, hi) in enumerate(BANDS):
@@ -108,13 +114,16 @@ def _filter(raw, case, design, cap, *, geometry=None):
     return selected, stats
 
 
-def _temporal_filter(raw, case, design, cap):
+def _temporal_filter(raw, case, design, cap, *, domain=None):
     xy = _observations(raw)
     if not raw["success"]:
         return [], dict(steps=len(xy) - 1, eligible_pairs=0, retained_pairs=0, skipped_failed=True,
                         stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
     # Coordinates preserve the earlier experiment's region. Frame order supplies the label.
-    inside = in_region(xy) & (np.linalg.norm(xy - np.asarray(case["goal"]), axis=1) <= BANDS[-1][1] + 1e-5)
+    if domain is None:
+        inside = in_region(xy) & (np.linalg.norm(xy - np.asarray(case["goal"]), axis=1) <= BANDS[-1][1] + 1e-5)
+    else:
+        inside = domain(xy)
     selected, stats = _select_steps(xy, raw["frames"], range(len(xy) - 1), inside, case, design, cap)
     return selected, dict(stats, skipped_failed=False)
 
@@ -258,7 +267,7 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
     return report
 
 
-def compare(runtime, design, handcrafted):
+def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_map=False):
     points = design["points"]
     goal_ids = design["goal_ids"]
     nx, ny = len(design["grid"]["xs"]), len(design["grid"]["ys"])
@@ -267,17 +276,26 @@ def compare(runtime, design, handcrafted):
     goals = [points[i] for i in goal_ids]
     tokens = _encode_positions(runtime, design, list(range(len(points))))
     raw = _scores(None, tokens, goal_ids, runtime.device)
-    methods = {"raw": ordinal_rows(points, goals, raw, raw, design["heldout_mask"], edges)}
-    checkpoints = {}
-    for name in ("handcrafted", *(f"band_{i + 1}" for i in range(len(BANDS)))):
-        if name == "handcrafted":
-            adapter = handcrafted
+    methods, legacy_methods, checkpoints = {}, {}, {}
+    for name in ("raw", "handcrafted", *(f"band_{i + 1}" for i in range(band_count))):
+        if name == "raw":
+            costs = raw
         else:
-            adapter, checkpoints[name] = _checkpoint(runtime, int(name[-1]) - 1)
-        costs = _scores(adapter, tokens, goal_ids, runtime.device)
-        methods[name] = ordinal_rows(points, goals, raw, costs, design["heldout_mask"], edges)
+            if name == "handcrafted":
+                adapter = handcrafted
+            else:
+                adapter, checkpoints[name] = _checkpoint(runtime, int(name.split("_")[1]) - 1)
+            costs = _scores(adapter, tokens, goal_ids, runtime.device)
+        legacy = ordinal_rows(points, goals, raw, costs, design["heldout_mask"], edges)
+        if full_half_map:
+            legacy_methods[name] = legacy
+            methods[name] = ordinal_rows(points, goals, raw, costs, design["heldout_mask"], edges, radius=np.inf)
+        else:
+            methods[name] = legacy
     report = dict(methods=methods, checkpoints=checkpoints, goal_ids=goal_ids,
                   grid=design["grid"], heldout_mask=design["heldout_mask"])
+    if full_half_map:
+        report["legacy_methods"] = legacy_methods
     write_json(runtime.root / "comparison.json", report)
     return report
 
@@ -287,13 +305,26 @@ def main(argv=None):
     parser.add_argument("operation", choices=("stage", "compare"))
     for field in ("source-run", "output-dir", "world-model-checkpoint", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{field}", type=Path, required=True)
-    parser.add_argument("--band", type=int, choices=range(1, len(BANDS) + 1))
+    parser.add_argument("--band", type=int)
     parser.add_argument("--starts-per-goal", type=int, default=6)
     parser.add_argument("--labels", choices=("progress", "temporal"), default="progress")
+    parser.add_argument("--sampling", choices=("radial", "half-square"), default="radial")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
-    if args.operation == "stage" and args.band is None:
-        parser.error("stage requires --band")
+    half_square = args.sampling == "half-square"
+    if half_square:
+        if args.labels != "temporal":
+            parser.error("half-square sampling requires temporal labels")
+        from src.mylonas_ijepa_wm import experience_half_square
+        bands = experience_half_square.BANDS
+        build_manifest = experience_half_square.make_manifest
+        label_filter = experience_half_square.filter_steps
+    else:
+        bands = BANDS
+        build_manifest = make_manifest
+        label_filter = _temporal_filter if args.labels == "temporal" else _filter
+    if args.operation == "stage" and args.band not in range(1, len(bands) + 1):
+        parser.error(f"stage requires --band between 1 and {len(bands)}")
     args.output_dir, source = locations(args.output_dir, args.source_run,
                                       (args.world_model_checkpoint, args.encoder_checkpoint, args.dino_wm_root))
     handcrafted, snapshot, design = load_ranking_source(source)
@@ -301,8 +332,11 @@ def main(argv=None):
     fitting = dict(source_config["fitting"], updates=500)
     if snapshot["fitting_signature"]["encoder_sha256"] != EXPECTED_ENCODER:
         raise ValueError("encoder differs from handcrafted benchmark")
-    manifest = make_manifest(design, args.starts_per_goal)
-    kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
+    manifest = build_manifest(design, args.starts_per_goal)
+    if half_square:
+        kind = "experience_temporal_half_square_v1"
+    else:
+        kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
     config = dict(kind=kind, manifest=manifest, handcrafted=snapshot,
                   fitting=fitting, scale=source_config["scale"])
     path = args.output_dir / "experiment.json"
@@ -319,10 +353,9 @@ def main(argv=None):
     runtime = PilotRuntime(args, manifest)
     try:
         if args.operation == "stage":
-            label_filter = _temporal_filter if args.labels == "temporal" else _filter
             return collect_and_fit(runtime, manifest, design, fitting, config["scale"], args.band - 1,
                                    filter_steps=label_filter)
-        return compare(runtime, design, handcrafted)
+        return compare(runtime, design, handcrafted, band_count=len(bands), full_half_map=half_square)
     finally:
         runtime.close()
 
