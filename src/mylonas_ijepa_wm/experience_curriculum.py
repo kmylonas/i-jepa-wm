@@ -69,17 +69,20 @@ def _protected(design):
             {design["frame_sha256"][i] for i in ids})
 
 
-def _filter(raw, case, design, cap):
+def _filter(raw, case, design, cap, *, geometry=None):
     xy = raw["states"].numpy()[:, :2]
     steps = raw["primitive_steps"].numpy()
     if (len(xy) != len(raw["frames"]) or not np.array_equal(steps, np.arange(len(xy)))
             or not np.isfinite(xy).all()):
         raise ValueError("raw observations must be finite and consecutive")
-    dist = np.linalg.norm(xy - np.asarray(case["goal"]), axis=1)
+    if geometry is None:
+        dist = np.linalg.norm(xy - np.asarray(case["goal"]), axis=1)
+        inside = in_region(xy) & (dist <= BANDS[-1][1] + 1e-5)
+    else:
+        dist, inside = geometry(xy, case["goal"])
     gains = dist[:-1] - dist[1:]
     progress = np.flatnonzero(gains >= GAP)
     points, hashes = _protected(design)
-    inside = in_region(xy) & (dist <= BANDS[-1][1] + 1e-5)
     if len(points):
         inside &= (np.linalg.norm(xy[:, None, :] - points[None, :, :], axis=-1) > 1e-5).all(axis=1)
     hashes.add(design["frame_sha256"][case["goal_id"]])
@@ -103,12 +106,12 @@ def _encode_positions(runtime, design, ids):
         selected = ids[offset:offset + 8]
         frames = np.stack([runtime.env._render_at(design["points"][i]) for i in selected])
         if any(_frame_hash(frame) != design["frame_sha256"][i] for i, frame in zip(selected, frames)):
-            raise ValueError("rendered reference or grid pixels differ from handcrafted benchmark")
+            raise ValueError("rendered reference or grid pixels differ from the saved design")
         parts.append(runtime.encode_frames(frames))
     return torch.cat(parts)
 
 
-def _replay(runtime, record, design, manifest):
+def _replay(runtime, record, design, manifest, *, filter_steps=_filter):
     case = record["case"]
     root = runtime.root
     path = root / "replay" / f"{case['case_id']}.pt"
@@ -125,7 +128,7 @@ def _replay(runtime, record, design, manifest):
     if (raw["case"] != case or raw["runtime_id"] != runtime.runtime_id
             or len(raw["frames"]) != record["micro_steps"] + 1):
         raise ValueError("raw observations do not match the completed rollout")
-    starts, stats = _filter(raw, dict(case, goal_id=manifest["goal_ids"][case["goal_index"]]),
+    starts, stats = filter_steps(raw, dict(case, goal_id=manifest["goal_ids"][case["goal_index"]]),
                            design, manifest["pair_cap"])
     ids = sorted({j for i in starts for j in (i, i + 1)})
     local = {i: j for j, i in enumerate(ids)}
@@ -153,7 +156,21 @@ def _raw_cost(target):
     return score
 
 
-def collect_and_fit(runtime, manifest, design, fitting, scale, index):
+def _initial_scale(tokens, population):
+    endpoints = sorted({(g, i) for g, a, b in population for i in (a, b)})
+    values = []
+    for batch in torch.as_tensor(endpoints).split(8):
+        ref, point = batch.T
+        values.append((tokens[ref].float() - tokens[point].float()).square().mean(dim=(1, 2)))
+    values = torch.cat(values)
+    positive = values[values > 0]
+    if not len(positive):
+        raise ValueError("first band has no positive raw goal cost")
+    return float(positive.median())
+
+
+def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
+                    filter_steps=_filter, encode_positions=_encode_positions):
     root = runtime.root
     band = f"band_{index + 1}"
     folder = root / band
@@ -163,7 +180,7 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index):
     goal_path = root / "collection_goals.pt"
     if not goal_path.exists():
         save_tensors(goal_path, dict(runtime_id=runtime.runtime_id,
-                                    tokens=_encode_positions(runtime, design, manifest["goal_ids"])))
+                                    tokens=encode_positions(runtime, design, manifest["goal_ids"])))
     payload = torch.load(goal_path, map_location="cpu", weights_only=True)
     if payload["runtime_id"] != runtime.runtime_id:
         raise ValueError("collection goal tokens come from a different runtime")
@@ -180,11 +197,14 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index):
     records = run_stage(root, band, manifest["stages"][index], runtime.runtime_id, execute, condition=condition)
     rows = []
     for record in records:
-        saved = _replay(runtime, record, design, manifest)
+        saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps)
         rows.append(dict(case=record["case"], success=record["success"],
                          **saved["stats"], retained_positions=saved["positions"].tolist()))
 
     new_pairs = sum(r["retained_pairs"] for r in rows)
+    derive_scale = scale is None
+    if derive_scale and prior is not None:
+        scale = prior["scale"]
     if new_pairs:
         token_parts, population, offset = [goals.half()], [], len(goals)
         for cases in manifest["stages"][:index + 1]:
@@ -196,6 +216,8 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index):
                     offset += len(saved["tokens"])
         tokens = torch.cat(token_parts)
         del token_parts
+        if scale is None:
+            scale = _initial_scale(tokens, population)
         adapter, training = fit(tokens, population, scale, **fitting, device=runtime.device,
                                 initial_adapter=initial, progress=lambda row: print(row, flush=True))
     elif initial is not None:
@@ -208,6 +230,8 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index):
     write_json(folder / "training.json", training)
     report = dict(**lineage, collection=rows, retained_pairs=new_pairs, updates=training["updates"],
                   checkpoint_sha256=file_sha256(folder / "adapter.pt"))
+    if derive_scale:
+        report["scale"] = scale
     write_json(folder / "complete.json", report)
     print(f"{band}: {sum(r['success'] for r in rows)}/{len(rows)} successful, "
           f"{new_pairs} retained pairs, {training['updates']} optimizer updates", flush=True)
