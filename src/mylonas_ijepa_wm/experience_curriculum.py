@@ -69,12 +69,33 @@ def _protected(design):
             {design["frame_sha256"][i] for i in ids})
 
 
-def _filter(raw, case, design, cap, *, geometry=None):
+def _observations(raw):
     xy = raw["states"].numpy()[:, :2]
     steps = raw["primitive_steps"].numpy()
     if (len(xy) != len(raw["frames"]) or not np.array_equal(steps, np.arange(len(xy)))
             or not np.isfinite(xy).all()):
         raise ValueError("raw observations must be finite and consecutive")
+    return xy
+
+
+def _select_steps(xy, frames, candidates, inside, case, design, cap):
+    points, hashes = _protected(design)
+    if len(points):
+        inside &= (np.linalg.norm(xy[:, None, :] - points[None, :, :], axis=-1) > 1e-5).all(axis=1)
+    hashes.add(design["frame_sha256"][case["goal_id"]])
+    eligible = []
+    for i in candidates:
+        if inside[i] and inside[i + 1]:
+            before, after = (_frame_hash(frames[j]) for j in (i, i + 1))
+            if before != after and not ({before, after} & hashes):
+                eligible.append(int(i))
+    selected = [eligible[k] for k in np.linspace(0, len(eligible) - 1, min(cap, len(eligible)), dtype=int)]
+    return selected, dict(steps=len(xy) - 1, eligible_pairs=len(eligible), retained_pairs=len(selected),
+                          stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
+
+
+def _filter(raw, case, design, cap, *, geometry=None):
+    xy = _observations(raw)
     if geometry is None:
         dist = np.linalg.norm(xy - np.asarray(case["goal"]), axis=1)
         inside = in_region(xy) & (dist <= BANDS[-1][1] + 1e-5)
@@ -82,21 +103,20 @@ def _filter(raw, case, design, cap, *, geometry=None):
         dist, inside = geometry(xy, case["goal"])
     gains = dist[:-1] - dist[1:]
     progress = np.flatnonzero(gains >= GAP)
-    points, hashes = _protected(design)
-    if len(points):
-        inside &= (np.linalg.norm(xy[:, None, :] - points[None, :, :], axis=-1) > 1e-5).all(axis=1)
-    hashes.add(design["frame_sha256"][case["goal_id"]])
-    eligible = []
-    for i in progress:
-        if inside[i] and inside[i + 1]:
-            before, after = (_frame_hash(raw["frames"][j]) for j in (i, i + 1))
-            if before != after and not ({before, after} & hashes):
-                eligible.append(int(i))
-    selected = [eligible[k] for k in np.linspace(0, len(eligible) - 1, min(cap, len(eligible)), dtype=int)]
-    return selected, dict(steps=len(gains), progress_steps=len(progress), eligible_pairs=len(eligible),
-                          retained_pairs=len(selected),
-                          stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()),
-                          away_steps=int((gains < -1e-5).sum()))
+    selected, stats = _select_steps(xy, raw["frames"], progress, inside, case, design, cap)
+    stats.update(progress_steps=len(progress), away_steps=int((gains < -1e-5).sum()))
+    return selected, stats
+
+
+def _temporal_filter(raw, case, design, cap):
+    xy = _observations(raw)
+    if not raw["success"]:
+        return [], dict(steps=len(xy) - 1, eligible_pairs=0, retained_pairs=0, skipped_failed=True,
+                        stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
+    # Coordinates preserve the earlier experiment's region. Frame order supplies the label.
+    inside = in_region(xy) & (np.linalg.norm(xy - np.asarray(case["goal"]), axis=1) <= BANDS[-1][1] + 1e-5)
+    selected, stats = _select_steps(xy, raw["frames"], range(len(xy) - 1), inside, case, design, cap)
+    return selected, dict(stats, skipped_failed=False)
 
 
 def _encode_positions(runtime, design, ids):
@@ -269,6 +289,7 @@ def main(argv=None):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int, choices=range(1, len(BANDS) + 1))
     parser.add_argument("--starts-per-goal", type=int, default=6)
+    parser.add_argument("--labels", choices=("progress", "temporal"), default="progress")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
     if args.operation == "stage" and args.band is None:
@@ -281,7 +302,8 @@ def main(argv=None):
     if snapshot["fitting_signature"]["encoder_sha256"] != EXPECTED_ENCODER:
         raise ValueError("encoder differs from handcrafted benchmark")
     manifest = make_manifest(design, args.starts_per_goal)
-    config = dict(kind="experience_curriculum_v1", manifest=manifest, handcrafted=snapshot,
+    kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
+    config = dict(kind=kind, manifest=manifest, handcrafted=snapshot,
                   fitting=fitting, scale=source_config["scale"])
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
@@ -297,7 +319,9 @@ def main(argv=None):
     runtime = PilotRuntime(args, manifest)
     try:
         if args.operation == "stage":
-            return collect_and_fit(runtime, manifest, design, fitting, config["scale"], args.band - 1)
+            label_filter = _temporal_filter if args.labels == "temporal" else _filter
+            return collect_and_fit(runtime, manifest, design, fitting, config["scale"], args.band - 1,
+                                   filter_steps=label_filter)
         return compare(runtime, design, handcrafted)
     finally:
         runtime.close()
