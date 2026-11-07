@@ -23,8 +23,8 @@ from src.mylonas_ijepa_wm.ranking_planning import _frame_hash
 
 GOAL = (15., 15.)
 LAYOUT = (32, 30)
-BANDS = ((6, 12), (12, 20), (20, 28), (28, 34))
-RADII = ((8, 10), (14, 18), (22, 26), (30, 34))
+BANDS = ((6, 12), (12, 20), (20, 28), (28, 34), (34, 42), (42, 50), (50, 58), (58, 64))
+RADII = ((8, 10), (14, 18), (22, 26), (30, 34), (36, 40), (44, 48), (52, 56), (60, 63))
 WALL_LEFT, WALL_RIGHT = 29., 35.
 DOOR_LOW, DOOR_HIGH = 26., 34.
 BOUNDS = (4.001, 59.999)
@@ -132,7 +132,7 @@ def _metric(truth, scores, groups):
 
 def run(output, env, encode, device, signature, *, updates=500):
     design = make_design()
-    config = dict(kind="geodesic_radial_v1", design=digest(design), runtime=signature, updates=updates)
+    config = dict(kind="geodesic_radial_v2", design=digest(design), runtime=signature, updates=updates)
     config_path = output / "config.json"
     if config_path.exists() and read(config_path) != config:
         raise ValueError("geodesic radial run configuration changed")
@@ -157,7 +157,7 @@ def run(output, env, encode, device, signature, *, updates=500):
     nodes = design["training"]
     fitting_hashes = set(hashes[:len(nodes) + 1])
     heldout = [i for i in design["grid"] if i is not None and hashes[i] not in fitting_hashes]
-    for index, (_, outer) in enumerate(BANDS):
+    for index, (inner, outer) in enumerate(BANDS):
         pairs = training_pairs(nodes, index)
         point_ids = sorted({i + 1 for pair in pairs for i in pair})
         remap = {i: j + 1 for j, i in enumerate(point_ids)}
@@ -182,6 +182,7 @@ def run(output, env, encode, device, signature, *, updates=500):
         adapted = _scores(adapter, tokens, [0], device)[0]
         previous, previous_sha = adapter, file_sha256(checkpoint)
         cohorts = dict(within_radius=[[i for i in heldout if radii[i] <= outer + TIE]],
+                       current_band=[[i for i in heldout if inner < radii[i] <= outer + TIE]],
                        beyond_radius=[[i for i in heldout if radii[i] > outer + TIE]],
                        opposite_side=[[i for i in heldout if points[i][0] > WALL_RIGHT]],
                        same_radius=[[i for i in ring["ids"] if hashes[i] not in fitting_hashes]

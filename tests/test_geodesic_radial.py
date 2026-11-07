@@ -23,11 +23,11 @@ def test_cumulative_pairs_include_all_band_and_direction_combinations():
     design = radial.make_design()
     assert design["goal"] == [15., 15.]
     nodes = design["training"]
-    assert set(n["band"] for n in nodes) == {0, 1, 2, 3}
+    assert set(n["band"] for n in nodes) == set(range(len(radial.BANDS)))
     assert any(n["point"][0] > 35 for n in nodes)
     assert all(radial.valid(n["point"]) for n in nodes)
     prior = set()
-    for stage in range(4):
+    for stage in range(len(radial.BANDS)):
         pairs = set(radial.training_pairs(nodes, stage))
         assert prior <= pairs and pairs
         expected = set()
@@ -42,3 +42,16 @@ def test_cumulative_pairs_include_all_band_and_direction_combinations():
     assert same_ring and any(nodes[i]["angle"] != nodes[j]["angle"] for i,j in same_ring)
     for n in nodes:
         assert np.linalg.norm(np.subtract(n["point"], design["goal"])) == pytest.approx(n["radius"])
+
+
+
+def test_outer_stages_reach_the_whole_map_and_sample_the_farthest_corner():
+    design = radial.make_design()
+    assert design["bands"][:4] == [[6, 12], [12, 20], [20, 28], [28, 34]]
+    outer_radius = design["bands"][-1][1]
+    for i in design["grid"]:
+        if i is not None:
+            assert math.dist(design["points"][i], design["goal"]) <= outer_radius
+    last_band = [n for n in design["training"] if n["band"] == len(design["bands"]) - 1]
+    assert len(last_band) >= 2
+    assert any(min(n["point"]) > 59 for n in last_band)
