@@ -231,3 +231,43 @@ def test_model_free_report_figures_and_actual_notebook_cells(planning_prepared,m
     context['shell']=lambda cmd,cwd=None:subprocess.run(list(map(str,cmd)),cwd=cwd,check=True)
     for i in (13,15):exec(''.join(n['cells'][i]['source']),context)
     assert len(images)==7 and r['summary']['overall']['both_success']==32
+
+
+def test_collected_benchmark_reuses_historical_episodes_and_shared_references(planning_prepared, tmp_path):
+    from src.mylonas_ijepa_wm.curriculum_protocol import digest, write_json
+    from src.mylonas_ijepa_wm.curriculum_replay import save_adapter
+    from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256
+
+    mod, source, historical, config, manifest, env, encode = planning_prepared
+    for role in ('raw', 'adapted'):
+        old = SyntheticRuntime(mod, historical, config, manifest, role, env, encode)
+        mod.evaluate_condition(source, historical, role, old)
+    collected = tmp_path / 'experience'
+    adapter, _, _ = module().load_ranking_source(source)
+    curriculum = dict(kind='experience_curriculum_v1', handcrafted=config['source'], manifest={'stages': [[], [], [], []]})
+    write_json(collected/'experiment.json', curriculum)
+    signature = dict(manifest=digest(curriculum['manifest']), models=config['models'],
+                     runtime_variant=dict(experiment_digest=digest(curriculum)))
+    identifier = digest(signature)
+    write_json(collected/'runtime.json', dict(runtime_id=identifier, signature=signature))
+    lineage = dict(runtime_id=identifier, band=4)
+    checkpoint = collected/'band_4/adapter.pt'
+    save_adapter(checkpoint, adapter, {}, lineage)
+    write_json(checkpoint.with_name('complete.json'), dict(**lineage, checkpoint_sha256=file_sha256(checkpoint)))
+
+    compare = module('experience_planning')
+    inputs, cases, refs, baselines, metric, old_signature = compare.load_inputs(historical, collected)
+    out = tmp_path/'comparison'
+    fresh = SyntheticRuntime(mod, out, config, manifest, 'collected', env, encode)
+    fresh.root = out
+    new_signature = dict(old_signature, torch_version='other')
+    result = compare.evaluate(fresh, inputs, cases, refs, baselines, metric, old_signature, new_signature)
+    assert result['handcrafted_vs_collected']['overall']['both_success'] == len(manifest['evaluation'])
+    assert result['runtime_differences']['torch_version'] == ['test', 'other']
+    compare.evaluate(fresh, inputs, cases, refs, baselines, metric, old_signature, new_signature)
+    assert len(fresh.visited) == len(manifest['evaluation'])
+    with pytest.raises(ValueError, match='runtime'):
+        compare.evaluate(fresh, inputs, cases, refs, baselines, metric, old_signature, dict(new_signature, models={}))
+    checkpoint.write_bytes(checkpoint.read_bytes()+b'changed')
+    with pytest.raises(ValueError, match='checkpoint'):
+        compare.load_inputs(historical, collected)

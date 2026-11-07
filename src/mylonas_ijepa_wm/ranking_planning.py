@@ -188,13 +188,19 @@ def evaluate_condition(source,output,condition,runtime,*,limit=None):
     a['runtime_variant'].pop('condition');b['runtime_variant'].pop('condition')
     if a!=b:raise ValueError('goal encoding and planning runtime signatures differ')
     inputs=_condition_inputs(config,_root(output,'reference'),saved)
+    metric=metric.to(runtime.device).eval().requires_grad_(False) if condition=='adapted' else None
+    records=_run_cases(root,manifest['evaluation'],condition,runtime,refs,metric,inputs,limit=limit)
+    _validated(source,output)
+    return records
+
+
+def _run_cases(root,cases,condition,runtime,refs,metric,inputs,*,limit=None):
     status=root/'stage.json'
     if status.exists() and read(status)['inputs']!=inputs:raise ValueError('planning stage inputs differ')
     write_json(status,dict(inputs=inputs,status='running'))
-    metric=metric.to(runtime.device).eval().requires_grad_(False) if condition=='adapted' else None
     before={k:v.detach().cpu().clone() for k,v in metric.state_dict().items()} if metric is not None else None
-    records=[];cases=manifest['evaluation'] if limit is None else manifest['evaluation'][:limit]
-    for index,case in enumerate(cases):
+    records=[];selected=cases if limit is None else cases[:limit]
+    for index,case in enumerate(selected):
         record=_episode(root,case,inputs)
         if record is None:
             started=time.monotonic();gi=case['goal_id']
@@ -208,13 +214,12 @@ def evaluate_condition(source,output,condition,runtime,*,limit=None):
                 video=dict(path=str(relative),sha256=file_sha256(p))
             write_json(path.with_suffix('.complete.json'),dict(inputs=dict(inputs,case=case),record_sha256=file_sha256(path),video=video))
         records.append(record)
-        print(f"{condition} {index+1}/{len(cases)} {case['case_id']} goal={case['goal']} success={record['success']} steps={record['micro_steps']} final_d={record['final_goal_distance']:.2f}",flush=True)
+        print(f"{condition} {index+1}/{len(selected)} {case['case_id']} goal={case['goal']} success={record['success']} steps={record['micro_steps']} final_d={record['final_goal_distance']:.2f}",flush=True)
     if metric is not None and not all(torch.equal(before[k],v.detach().cpu()) for k,v in metric.state_dict().items()):
         raise ValueError('frozen ranking adapter changed in memory')
-    _validated(source,output)
-    completed=[r for case in manifest['evaluation'] if (r:=_episode(root,case,inputs)) is not None]
-    write_json(status,dict(inputs=inputs,status='complete' if len(completed)==len(manifest['evaluation']) else 'partial',
-        completed=len(completed),total=len(manifest['evaluation']),primitive_interactions_committed=sum(r['micro_steps'] for r in completed)))
+    completed=[r for case in cases if (r:=_episode(root,case,inputs)) is not None]
+    write_json(status,dict(inputs=inputs,status='complete' if len(completed)==len(cases) else 'partial',
+        completed=len(completed),total=len(cases),primitive_interactions_committed=sum(r['micro_steps'] for r in completed)))
     return records
 
 
