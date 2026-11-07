@@ -131,8 +131,12 @@ def _metric(truth, scores, groups):
 
 
 def run(output, env, encode, device, signature, *, updates=500):
-    design = make_design()
-    config = dict(kind="geodesic_radial_v2", design=digest(design), runtime=signature, updates=updates)
+    return _run_design(output, env, encode, device, signature, make_design(), "geodesic_radial_v2", updates)
+
+
+def _run_design(output, env, encode, device, signature, design, kind, updates):
+    square = design.get("geometry") == "square"
+    config = dict(kind=kind, design=digest(design), runtime=signature, updates=updates)
     config_path = output / "config.json"
     if config_path.exists() and read(config_path) != config:
         raise ValueError("geodesic radial run configuration changed")
@@ -140,24 +144,28 @@ def run(output, env, encode, device, signature, *, updates=500):
     write_json(output / "design.json", design)
     env.reset(0, layout=LAYOUT, start=(18, 15), goal=GOAL)
     goal_frame = env.render_goal()
-    hashes, chunks = [], []
+    hashes, tokens = [], None
     points = design["points"]
     for start in range(0, len(points), 8):
         frames = np.stack([goal_frame if i == 0 else env._render_at(points[i])
                            for i in range(start, min(start + 8, len(points)))])
         hashes.extend(map(_frame_hash, frames))
-        chunks.append(encode(frames).detach().cpu().float())
-    tokens = torch.cat(chunks)
-    del chunks
+        batch = encode(frames).detach().cpu().float()
+        if tokens is None:
+            tokens = batch.new_empty((len(points), *batch.shape[1:]))
+        tokens[start:start + len(batch)].copy_(batch)
     raw = _scores(None, tokens, [0], device)[0]
     truth = np.asarray([distance(p) for p in points])
-    radii = np.linalg.norm(np.asarray(points) - GOAL, axis=1)
+    offsets = np.asarray(points) - GOAL
+    radii = np.abs(offsets).max(axis=1) if square else np.linalg.norm(offsets, axis=1)
+    within, beyond, same, size = (("within_square", "beyond_square", "same_extent", "half_width") if square
+                                  else ("within_radius", "beyond_radius", "same_radius", "outer_radius"))
     reports = []
     previous, previous_sha = None, None
     nodes = design["training"]
     fitting_hashes = set(hashes[:len(nodes) + 1])
     heldout = [i for i in design["grid"] if i is not None and hashes[i] not in fitting_hashes]
-    for index, (inner, outer) in enumerate(BANDS):
+    for index, (inner, outer) in enumerate(design["bands"]):
         pairs = training_pairs(nodes, index)
         point_ids = sorted({i + 1 for pair in pairs for i in pair})
         remap = {i: j + 1 for j, i in enumerate(point_ids)}
@@ -181,27 +189,27 @@ def run(output, env, encode, device, signature, *, updates=500):
             write_json(marker, dict(inputs=provenance, sha256=file_sha256(checkpoint)))
         adapted = _scores(adapter, tokens, [0], device)[0]
         previous, previous_sha = adapter, file_sha256(checkpoint)
-        cohorts = dict(within_radius=[[i for i in heldout if radii[i] <= outer + TIE]],
-                       current_band=[[i for i in heldout if inner < radii[i] <= outer + TIE]],
-                       beyond_radius=[[i for i in heldout if radii[i] > outer + TIE]],
-                       opposite_side=[[i for i in heldout if points[i][0] > WALL_RIGHT]],
-                       same_radius=[[i for i in ring["ids"] if hashes[i] not in fitting_hashes]
-                                    for ring in design["rings"]])
+        cohorts = {within: [[i for i in heldout if radii[i] <= outer + TIE]],
+                   "current_band": [[i for i in heldout if inner < radii[i] <= outer + TIE]],
+                   beyond: [[i for i in heldout if radii[i] > outer + TIE]],
+                   "opposite_side": [[i for i in heldout if points[i][0] > WALL_RIGHT]],
+                   same: [[i for i in ring["ids"] if hashes[i] not in fitting_hashes] for ring in design["rings"]]}
         within_band = sum(nodes[a]["band"] == nodes[b]["band"] for a, b in pairs)
         counts = dict(within_band=within_band, across_bands=len(pairs) - within_band,
-                      same_radius=sum(nodes[a]["radius"] == nodes[b]["radius"] for a, b in pairs),
                       across_wall=sum(nodes[a]["point"][0] > WALL_RIGHT and nodes[b]["point"][0] < WALL_LEFT
                                       or nodes[b]["point"][0] > WALL_RIGHT and nodes[a]["point"][0] < WALL_LEFT
                                       for a, b in pairs),
                       opposite_side_nodes=sum(points[i][0] > WALL_RIGHT for i in point_ids))
-        report = dict(band=index + 1, outer_radius=outer, training_points=point_ids,
+        counts[same] = sum(nodes[a]["radius"] == nodes[b]["radius"] for a, b in pairs)
+        report = dict(band=index + 1, training_points=point_ids,
                       pair_counts=dict(total=len(pairs), **counts),
                       metrics={name: dict(raw=_metric(truth, raw, ids), adapted=_metric(truth, adapted, ids))
                                for name, ids in cohorts.items()},
-                      adapted=adapted.tolist(), train_accuracy=training["probe_after"]["rank_accuracy"])
+                      adapted=adapted.tolist(), train_accuracy=training["probe_after"]["rank_accuracy"],
+                      **{size: outer})
         write_json(stage / "report.json", report)
         reports.append(report)
-        print(f"Band {index + 1} R={outer}: {report['pair_counts']}", flush=True)
+        print(f"Band {index + 1} {'half-width' if square else 'R'}={outer}: {report['pair_counts']}", flush=True)
     result = dict(design=design, truth=truth.tolist(), raw=raw.tolist(), stages=reports)
     write_json(output / "comparison.json", result)
     return result
