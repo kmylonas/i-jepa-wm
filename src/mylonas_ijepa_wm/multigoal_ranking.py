@@ -1,4 +1,6 @@
 """Manual reference/far/near comparisons, ranking-only fitting and metrics."""
+from copy import deepcopy
+
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -31,7 +33,7 @@ def triples(positions,reference_ids):
 def triplet_costs(adapter,tokens,population,*,device='cpu',batch_size=16):
     parts=[[],[]]
     for selection in torch.as_tensor(population,dtype=torch.long).split(batch_size):
-        g,f,n=[tokens[selection[:,j]].to(device) for j in range(3)]
+        g,f,n=[tokens[selection[:,j]].to(device,dtype=torch.float32) for j in range(3)]
         if adapter is not None:g,f,n=adapter(g),adapter(f),adapter(n)
         parts[0].append((f-g).square().mean(dim=(1,2)).cpu())
         parts[1].append((n-g).square().mean(dim=(1,2)).cpu())
@@ -39,17 +41,24 @@ def triplet_costs(adapter,tokens,population,*,device='cpu',batch_size=16):
 
 
 def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=64,lr=1e-4,
-        device='cpu',progress=None):
-    tokens=tokens.detach().cpu().float();values=np.asarray(population)
+        device='cpu',progress=None,initial_adapter=None):
+    tokens=tokens.detach().cpu()
+    if tokens.dtype!=torch.float16:tokens=tokens.float()
+    values=np.asarray(population)
     if (values.ndim!=2 or values.shape[1:]!=(3,) or not len(values)
             or not np.issubdtype(values.dtype,np.integer) or (values<0).any()
             or (values>=len(tokens)).any() or any((values[:,a]==values[:,b]).any() for a,b in ((0,1),(0,2),(1,2)))
             or not np.isfinite(scale) or scale<=0):raise ValueError('invalid triples or raw scale')
-    if (tokens.ndim!=3 or not torch.isfinite(tokens).all() or updates<1 or batch_size<1
+    if (tokens.ndim!=3 or not all(torch.isfinite(chunk).all() for chunk in tokens.split(32)) or updates<1 or batch_size<1
             or bottleneck<1 or not np.isfinite(lr) or lr<=0):raise ValueError('invalid ranking inputs or schedule')
     population=torch.as_tensor(values,dtype=torch.long)
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed);adapter=ResidualTokenAdapter(tokens.shape[-1],bottleneck).to(device)
+    if initial_adapter is None:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed);adapter=ResidualTokenAdapter(tokens.shape[-1],bottleneck).to(device)
+    else:
+        if (initial_adapter.dim,initial_adapter.bottleneck)!=(tokens.shape[-1],bottleneck):
+            raise ValueError('initial adapter shape differs from ranking inputs')
+        adapter=deepcopy(initial_adapter).to(device).train().requires_grad_(True)
     reference_ids=torch.unique(population[:,0]).tolist()
     buckets=[torch.nonzero(population[:,0]==g).flatten().numpy() for g in reference_ids]
     probe_ids=np.sort(np.random.default_rng(1729).choice(len(population),min(256,len(population)),replace=False))
@@ -83,7 +92,7 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
         history.append(row)
     after=probe();adapter.eval()
     return adapter,dict(seed=seed,updates=updates,batch_size=batch_size,bottleneck=bottleneck,lr=lr,
-        initialization='identity',anchor_weight=0,scale=float(scale),margin=MARGIN,min_physical_gap=GAP,
+        initialization='identity' if initial_adapter is None else 'previous_adapter',anchor_weight=0,scale=float(scale),margin=MARGIN,min_physical_gap=GAP,
         objective='ranking',loss='mean(softplus(0.2-(far_cost-near_cost)/scale))',
         sampling='uniform_reference_then_uniform_valid_comparison',eligible_triples=len(population),
         reference_ids=reference_ids,reference_counts=refs.tolist(),endpoint_counts=endpoints.tolist(),
