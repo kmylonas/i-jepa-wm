@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -56,18 +57,23 @@ def make_manifest(eval_per_band=20, train_per_run=40, run_seeds=(0, 1, 2), seed=
                 protocol_variant="agreed" if (eval_per_band, train_per_run, tuple(run_seeds)) == (20, 40, (0, 1, 2)) else "modified")
 
 
-def run_stage(root, stage, cases, runtime_id, execute, *, condition=None):
+def run_stage(root, stage, cases, runtime_id, execute, *, condition=None, success_quota=None):
     """Persist each finished case; interrupted attempts have no committed record."""
     root = Path(root)
     stage_file = root / "stages" / f"{stage}.json"
     signature = dict(runtime_id=runtime_id, cases_digest=digest(cases), condition=condition)
+    if success_quota is not None:
+        signature["success_quota"] = success_quota
     if stage_file.exists():
         prior = json.loads(stage_file.read_text())
         if any(prior.get(key) != value for key, value in signature.items()):
             raise ValueError(f"stage provenance mismatch: {stage}")
     write_json(stage_file, {**signature, "status": "running"})
     records = []
+    successes = Counter()
     for index, case in enumerate(cases):
+        if success_quota is not None and successes[case["goal_index"]] >= success_quota:
+            continue
         path = root / "episodes" / stage / f"{case['case_id']}.json"
         if path.exists():
             record = json.loads(path.read_text())
@@ -81,6 +87,8 @@ def run_stage(root, stage, cases, runtime_id, execute, *, condition=None):
             record.update(case=case, case_id=case["case_id"], runtime_id=runtime_id, condition=condition)
             write_json(path, record)
         records.append(record)
+        if success_quota is not None and record["success"] and record["micro_steps"] > record.get("prefix_steps", 0):
+            successes[case["goal_index"]] += 1
         print(f"{stage} {index + 1}/{len(cases)} {case['case_id']} success={record['success']} steps={record['micro_steps']}", flush=True)
     write_json(stage_file, {**signature, "status": "complete", "episodes": len(records),
                             "primitive_interactions": sum(item["micro_steps"] for item in records)})
@@ -94,12 +102,18 @@ def load_stage(root, stage, cases, runtime_id):
             or status.get("cases_digest") != digest(cases)):
         raise ValueError(f"stage incomplete or provenance mismatch: {stage}")
     records = []
+    successes = Counter()
+    success_quota = status.get("success_quota")
     for case in cases:
+        if success_quota is not None and successes[case["goal_index"]] >= success_quota:
+            continue
         record = json.loads((root / "episodes" / stage / f"{case['case_id']}.json").read_text())
         if (record.get("case") != case or record.get("runtime_id") != runtime_id
                 or record.get("condition") != status.get("condition")):
             raise ValueError(f"episode provenance mismatch: {case['case_id']}")
         records.append(record)
+        if success_quota is not None and record["success"] and record["micro_steps"] > record.get("prefix_steps", 0):
+            successes[case["goal_index"]] += 1
     return records
 
 

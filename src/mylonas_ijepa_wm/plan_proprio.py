@@ -64,25 +64,10 @@ def parse_args(argv=None):
 
 
 def run_episode(adapter, config, encoder, model, metadata, args, device, precision, seed, frames,
-                *, initial=None, latent_cost_fn=None, observation_observer=None, plan_observer=None):
+                *, initial=None, latent_cost_fn=None, observation_observer=None, plan_observer=None,
+                initial_action=None):
     initial = adapter.reset(seed) if initial is None else initial
-    state_mean = metadata["state_mean"].to(device=device, dtype=torch.float32)
-    state_std = metadata["state_std"].to(device=device, dtype=torch.float32)
     num_hist = model.num_hist
-    latent = visual.encode_frame(encoder, initial.frame, device, precision)
-    goal_latent = (
-        visual.encode_frame(encoder, adapter.render_goal(), device, precision)
-        if args.cost == "latent" else None
-    )
-    latent_history = latent.unsqueeze(0).repeat(num_hist, 1, 1)
-    state = torch.as_tensor(initial.state, device=device, dtype=torch.float32)
-    state_history = ((state - state_mean) / state_std).unsqueeze(0).repeat(num_hist, 1)
-    action_history = torch.zeros(num_hist - 1, config.macro_action_dim, device=device)
-    low = torch.as_tensor(np.tile(adapter.action_low, config.actions_per_model_step))
-    high = torch.as_tensor(np.tile(adapter.action_high, config.actions_per_model_step))
-    if getattr(args, "unbounded_actions", False):
-        low = torch.full_like(low, -torch.inf)
-        high = torch.full_like(high, torch.inf)
     initial_distance = float(np.linalg.norm(initial.state[:2] - adapter.goal))
     positions = [initial.state[:2].tolist()]
     states = [initial.state.tolist()]
@@ -97,8 +82,48 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
     mpc_updates = 0
     if observation_observer is not None:
         observation_observer(0, initial, None)
+
+    def execute_micro(action):
+        nonlocal micro_steps
+        outcome = adapter.step(action)
+        micro_steps += 1
+        primitive_actions.append(action.tolist())
+        if observation_observer is not None:
+            observation_observer(micro_steps, outcome, action.copy())
+        if frames is not None:
+            frames.append(adapter.render_video())
+        return outcome
+
+    if initial_action is not None and not success:
+        action = np.asarray(initial_action, dtype=np.float32)
+        if num_hist != 1 or action.shape != (config.micro_action_dim,) or not np.isfinite(action).all():
+            raise ValueError("random prefix requires a history-1 model and a finite primitive action")
+        initial = execute_micro(action)
+        positions.append(initial.state[:2].tolist())
+        states.append(initial.state.tolist())
+        success, terminated, truncated = initial.success, initial.terminated, initial.truncated
+    prefix_steps = micro_steps
+    primitive_limit = args.max_macro_steps * config.actions_per_model_step
+
+    state_mean = metadata["state_mean"].to(device=device, dtype=torch.float32)
+    state_std = metadata["state_std"].to(device=device, dtype=torch.float32)
+    latent = visual.encode_frame(encoder, initial.frame, device, precision)
+    goal_latent = (
+        visual.encode_frame(encoder, adapter.render_goal(), device, precision)
+        if args.cost == "latent" else None
+    )
+    latent_history = latent.unsqueeze(0).repeat(num_hist, 1, 1)
+    state = torch.as_tensor(initial.state, device=device, dtype=torch.float32)
+    state_history = ((state - state_mean) / state_std).unsqueeze(0).repeat(num_hist, 1)
+    action_history = torch.zeros(num_hist - 1, config.macro_action_dim, device=device)
+    low = torch.as_tensor(np.tile(adapter.action_low, config.actions_per_model_step))
+    high = torch.as_tensor(np.tile(adapter.action_high, config.actions_per_model_step))
+    if getattr(args, "unbounded_actions", False):
+        low = torch.full_like(low, -torch.inf)
+        high = torch.full_like(high, torch.inf)
     rng = visual._create_generator(device, seed)
-    while len(actions) < args.max_macro_steps and not (success or terminated or truncated):
+    while (len(actions) < args.max_macro_steps and micro_steps < primitive_limit
+           and not (success or terminated or truncated)):
         plan = planner.plan_action(
             model=model, latent_history=latent_history,
             state_history=state_history, action_history=action_history,
@@ -124,17 +149,9 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
             macro = macro.detach().cpu().numpy().astype(np.float32)
             macro_start = micro_steps
             for micro in macro.reshape(config.actions_per_model_step, config.micro_action_dim):
-                outcome = adapter.step(micro)
-                micro_steps += 1
-                primitive_actions.append(micro.tolist())
-                if observation_observer is not None:
-                    observation_observer(micro_steps, outcome, micro.copy())
-                if frames is not None:
-                    frames.append(adapter.render_video())
-                success = outcome.success
-                terminated = outcome.terminated
-                truncated = outcome.truncated
-                if success or terminated or truncated:
+                outcome = execute_micro(micro)
+                success, terminated, truncated = outcome.success, outcome.terminated, outcome.truncated
+                if success or terminated or truncated or micro_steps == primitive_limit:
                     break
             next_state = torch.as_tensor(outcome.state, device=device, dtype=torch.float32)
             next_latent = visual.encode_frame(encoder, outcome.frame, device, precision)
@@ -151,7 +168,7 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
             positions.append(outcome.state[:2].tolist())
             states.append(outcome.state.tolist())
             final_cost = plan.cost
-            if success or terminated or truncated:
+            if success or terminated or truncated or micro_steps == primitive_limit:
                 break
     return {
         "seed": seed, "environment": config.env, "cost_mode": args.cost,
@@ -159,6 +176,7 @@ def run_episode(adapter, config, encoder, model, metadata, args, device, precisi
         "success": bool(success), "terminated": bool(terminated),
         "truncated": bool(truncated), "macro_steps": len(actions),
         "micro_steps": micro_steps,
+        **({"prefix_steps": prefix_steps} if initial_action is not None else {}),
         "primitive_actions": primitive_actions, "macro_durations": macro_durations,
         "mpc_updates": mpc_updates,
         "initial_goal_distance": initial_distance,

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from src.mylonas_ijepa_wm import experience_exploration
 from src.mylonas_ijepa_wm.cost_adapter import adapter_goal_cost
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
 from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, load_stage, run_stage, write_json
@@ -115,17 +116,22 @@ def _filter(raw, case, design, cap, *, geometry=None):
     return selected, stats
 
 
+def _failed_temporal_stats(xy):
+    return dict(steps=len(xy) - 1, eligible_pairs=0, retained_pairs=0, skipped_failed=True,
+                stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
+
+
 def _temporal_filter(raw, case, design, cap, *, domain=None):
     xy = _observations(raw)
     if not raw["success"]:
-        return [], dict(steps=len(xy) - 1, eligible_pairs=0, retained_pairs=0, skipped_failed=True,
-                        stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
+        return [], _failed_temporal_stats(xy)
     # Coordinates preserve the earlier experiment's region. Frame order supplies the label.
     if domain is None:
         inside = in_region(xy) & (np.linalg.norm(xy - np.asarray(case["goal"]), axis=1) <= BANDS[-1][1] + 1e-5)
     else:
         inside = domain(xy)
-    selected, stats = _select_steps(xy, raw["frames"], range(len(xy) - 1), inside, case, design, cap)
+    candidates = range(raw.get("prefix_steps", 0), len(xy) - 1)
+    selected, stats = _select_steps(xy, raw["frames"], candidates, inside, case, design, cap)
     return selected, dict(stats, skipped_failed=False)
 
 
@@ -143,6 +149,9 @@ def _encode_positions(runtime, design, ids):
 
 def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root=None):
     case = record["case"]
+    if record["raw_path"] is None and not record["success"] and "exploration" in manifest:
+        xy = np.asarray(record["primitive_positions"])
+        return dict(stats=_failed_temporal_stats(xy), positions=torch.empty((0, 2)))
     root = runtime.root
     path = root / "replay" / f"{case['case_id']}.pt"
     lineage = dict(runtime_id=runtime.runtime_id, case=case, raw_sha256=record["raw_sha256"])
@@ -220,12 +229,20 @@ def _collect_band(runtime, manifest, design, index, initial, prior, encode_posit
     scorers = [adapter_goal_cost(initial, t) if initial is not None else _raw_cost(t) for t in targets]
     condition = dict(goal_sha256=file_sha256(goal_path), collector=prior["checkpoint_sha256"] if prior else "raw")
 
+    exploration = manifest.get("exploration")
+
     def execute(case):
-        record = runtime.run_case(case, capture=True, latent_cost_fn=scorers[case["goal_index"]], journal_stage=band)
-        record["raw_sha256"] = file_sha256(root / record["raw_path"])
+        options = (dict(initial_action=case["random_first_action"], capture_failures=False)
+                   if exploration else {})
+        record = runtime.run_case(case, capture=True, latent_cost_fn=scorers[case["goal_index"]],
+                                  journal_stage=band, **options)
+        if record["raw_path"] is not None:
+            record["raw_sha256"] = file_sha256(root / record["raw_path"])
         return record
 
-    records = run_stage(root, band, manifest["stages"][index], runtime.runtime_id, execute, condition=condition)
+    quota = exploration["success_quota"] if exploration else None
+    records = run_stage(root, band, manifest["stages"][index], runtime.runtime_id, execute,
+                        condition=condition, success_quota=quota)
     return records, goals, condition
 
 
@@ -296,8 +313,12 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
     rows = []
     for record in records:
         saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps, raw_root=raw_root)
-        rows.append(dict(case=record["case"], success=record["success"],
-                         **saved["stats"], retained_positions=saved["positions"].tolist()))
+        row = dict(case=record["case"], success=record["success"],
+                   **saved["stats"], retained_positions=saved["positions"].tolist())
+        if "exploration" in manifest:
+            row["exploration"] = experience_exploration.measure(
+                record, manifest["bands"][index][0], runtime.config.actions_per_model_step)
+        rows.append(row)
 
     new_pairs = sum(r["retained_pairs"] for r in rows)
     derive_scale = scale is None
@@ -305,13 +326,16 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
         scale = prior["scale"]
     if new_pairs:
         token_parts, population, offset = [goals.half()], [], len(goals)
-        for cases in manifest["stages"][:index + 1]:
-            for case in cases:
+        earlier = [read(root / f"band_{i + 1}" / "complete.json")["collection"] for i in range(index)]
+        for stage_rows in (*earlier, rows):
+            for row in stage_rows:
+                if not row["retained_pairs"]:
+                    continue
+                case = row["case"]
                 saved = torch.load(root / "replay" / f"{case['case_id']}.pt", map_location="cpu", weights_only=True)
-                if saved["pairs"]:
-                    token_parts.append(saved["tokens"])
-                    population.extend([case["goal_index"], offset + a, offset + b] for a, b in saved["pairs"])
-                    offset += len(saved["tokens"])
+                token_parts.append(saved["tokens"])
+                population.extend([case["goal_index"], offset + a, offset + b] for a, b in saved["pairs"])
+                offset += len(saved["tokens"])
         tokens = torch.cat(token_parts)
         del token_parts
         if scale is None:
@@ -376,7 +400,10 @@ def main(argv=None):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int)
     parser.add_argument("--band1-source", type=Path, help="Reuse the completed rollouts of a matching raw Band 1 run.")
-    parser.add_argument("--starts-per-goal", type=int, default=6)
+    parser.add_argument("--starts-per-goal", type=int, default=6,
+                        help="Number of starts per goal, or attempt cap with a success quota.")
+    parser.add_argument("--random-first-probability", type=float, default=0.)
+    parser.add_argument("--success-quota", type=int, help="Target successful MPC episodes per goal and band.")
     planner_lengths = range(1, PLANNING["planning_horizon"] + 1)
     parser.add_argument("--actions-per-plan", type=int, choices=planner_lengths)
     parser.add_argument("--planning-horizon", type=int, choices=planner_lengths)
@@ -386,6 +413,13 @@ def main(argv=None):
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
     half_square = args.sampling == "half-square"
+    if args.success_quota is not None:
+        if (not half_square or args.band1_source is not None or args.operation == "collect-raw"
+                or not 1 <= args.success_quota <= args.starts_per_goal
+                or not 0 <= args.random_first_probability <= 1):
+            parser.error("a valid success quota requires fresh half-square collection and a probability in [0, 1]")
+    elif args.random_first_probability != 0:
+        parser.error("random first actions require a success quota")
     if args.wide_square_bands and not half_square:
         parser.error("wide-square-bands requires half-square sampling")
     if half_square:
@@ -423,6 +457,9 @@ def main(argv=None):
         kind = "experience_temporal_half_square_v1"
     else:
         kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
+    if args.success_quota is not None:
+        experience_exploration.configure(manifest, args.random_first_probability, args.success_quota)
+        kind = "experience_random_first_half_square_v1"
     config = dict(kind=kind, manifest=manifest, handcrafted=snapshot,
                   fitting=fitting, scale=source_config["scale"])
     raw_band1 = None

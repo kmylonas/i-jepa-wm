@@ -211,7 +211,7 @@ class PilotRuntime:
         return torch.cat(encoded)
 
     def run_case(self, case, *, metric=None, capture=False, cost="latent", latent_cost_fn=None,
-                 journal_stage=None):
+                 journal_stage=None, initial_action=None, capture_failures=True):
         if latent_cost_fn is not None and (metric is not None or cost != "latent"):
             raise ValueError("explicit latent scorer requires latent cost without an adapter")
         self.load_world_model()
@@ -241,10 +241,13 @@ class PilotRuntime:
                 self.env, self.config, self.encoder, self.model, self.metadata,
                 planning_args, self.device, self.precision, case["seed"], video_frames,
                 initial=initial, latent_cost_fn=scorer, observation_observer=observe,
+                **({"initial_action": initial_action} if initial_action is not None else {}),
             )
         record["attempt_id"] = journal.identity["attempt_id"]
         record["raw_path"] = None
-        if capture:
+        if capture and not capture_failures:
+            record["primitive_positions"] = [state[:2].tolist() for state in states]
+        if capture and (capture_failures or record["success"]):
             path = Path("raw") / f"run_{case['run_seed']}" / f"{case['case_id']}.pt"
             save_tensors(self.root / path, dict(
                 runtime_id=self.runtime_id, case=case, success=record["success"],
@@ -252,6 +255,7 @@ class PilotRuntime:
                 primitive_steps=torch.tensor(steps, dtype=torch.int64),
                 primitive_actions=torch.tensor(record["primitive_actions"], dtype=torch.float32).reshape(-1, 2),
                 macro_durations=record["macro_durations"],
+                **({"prefix_steps": record["prefix_steps"]} if "prefix_steps" in record else {}),
             ))
             record["raw_path"] = str(path)
         if video_frames:
