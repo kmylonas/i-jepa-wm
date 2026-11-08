@@ -7,7 +7,7 @@ import torch
 
 from src.mylonas_ijepa_wm.cost_adapter import adapter_goal_cost
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
-from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, run_stage, write_json
+from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, load_stage, run_stage, write_json
 from src.mylonas_ijepa_wm.curriculum_replay import load_adapter, save_adapter
 from src.mylonas_ijepa_wm.curriculum_runtime import EXPECTED_ENCODER, EXPECTED_WM, PilotRuntime, file_sha256, save_tensors
 from src.mylonas_ijepa_wm.multigoal_ranking import GAP, fit, ordinal_rows
@@ -140,21 +140,27 @@ def _encode_positions(runtime, design, ids):
     return torch.cat(parts)
 
 
-def _replay(runtime, record, design, manifest, *, filter_steps=_filter):
+def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root=None):
     case = record["case"]
     root = runtime.root
     path = root / "replay" / f"{case['case_id']}.pt"
     lineage = dict(runtime_id=runtime.runtime_id, case=case, raw_sha256=record["raw_sha256"])
+    source_runtime_id = runtime.runtime_id if raw_root is None else record["runtime_id"]
+    if raw_root is not None:
+        lineage["source_runtime_id"] = source_runtime_id
     if path.exists():
         saved = torch.load(path, map_location="cpu", weights_only=True)
         if saved["inputs"] != lineage:
             raise ValueError(f"replay provenance differs for {case['case_id']}")
         return saved
-    raw_path = root / record["raw_path"]
+    source = root if raw_root is None else raw_root
+    raw_path = (source / record["raw_path"]).resolve()
+    raw_path.relative_to(source.resolve())
     if file_sha256(raw_path) != record["raw_sha256"]:
         raise ValueError(f"raw observations changed for {case['case_id']}")
     raw = torch.load(raw_path, map_location="cpu", weights_only=True)
-    if (raw["case"] != case or raw["runtime_id"] != runtime.runtime_id
+    if (raw["case"] != case or raw["runtime_id"] != source_runtime_id
+            or (raw_root is not None and raw["success"] != record["success"])
             or len(raw["frames"]) != record["micro_steps"] + 1):
         raise ValueError("raw observations do not match the completed rollout")
     starts, stats = filter_steps(raw, dict(case, goal_id=manifest["goal_ids"][case["goal_index"]]),
@@ -222,18 +228,68 @@ def _collect_band(runtime, manifest, design, index, initial, prior, encode_posit
     return records, goals, condition
 
 
+def _read_raw_band1(root, config):
+    manifest = config["manifest"]
+    source_config = read(root / "experiment.json")
+    if source_config != dict(config, purpose="raw_band_1"):
+        raise ValueError("saved raw collection differs in its cases, planner settings or inputs")
+    saved = read(root / "runtime.json")
+    signature, source_id = saved["signature"], saved["runtime_id"]
+    if (source_id != digest(signature) or signature["manifest"] != digest(manifest)
+            or signature["runtime_variant"]["experiment_digest"] != digest(source_config)):
+        raise ValueError("saved raw runtime provenance differs")
+    stage = read(root / "stages" / "band_1.json")
+    if stage["condition"]["collector"] != "raw":
+        raise ValueError("saved Band 1 was not collected with raw MSE")
+    records = load_stage(root, "band_1", manifest["stages"][0], source_id)
+    provenance = dict(root=str(root), runtime_id=source_id, records_digest=digest(records),
+                      goal_sha256=stage["condition"]["goal_sha256"])
+    return dict(root=root, signature=signature, records=records, provenance=provenance)
+
+
+def _reuse_band1(runtime, manifest, archive):
+    source, provenance = archive["root"], archive["provenance"]
+    current = read(runtime.root / "runtime.json")["signature"]
+    for key in ("models", "dino_commit", "dino_source", "precision", "encoder_batch_size"):
+        if current[key] != archive["signature"][key]:
+            raise ValueError(f"saved raw collection runtime differs for {key}")
+    original = source / "collection_goals.pt"
+    if file_sha256(original) != provenance["goal_sha256"]:
+        raise ValueError("saved raw collection goal checksum differs")
+    targets = torch.load(original, map_location="cpu", weights_only=True)
+    goals = targets["tokens"]
+    if (targets["runtime_id"] != provenance["runtime_id"] or goals.ndim != 3
+            or len(goals) != len(manifest["goal_ids"]) or not torch.isfinite(goals).all()):
+        raise ValueError("saved raw collection goal tensors differ")
+    goal_path = runtime.root / "collection_goals.pt"
+    if goal_path.exists():
+        saved = torch.load(goal_path, map_location="cpu", weights_only=True)
+        if saved["runtime_id"] != runtime.runtime_id or not torch.equal(saved["tokens"], goals):
+            raise ValueError("local collection goal tensors differ from the imported targets")
+    else:
+        save_tensors(goal_path, dict(runtime_id=runtime.runtime_id, tokens=goals))
+    print(f"Reusing {len(archive['records'])} archived raw rollouts from {source}", flush=True)
+    condition = dict(goal_sha256=file_sha256(goal_path), collector="raw", source_runtime_id=provenance["runtime_id"])
+    return archive["records"], goals, condition
+
+
 def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
-                    filter_steps=_filter, encode_positions=_encode_positions):
+                    filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None):
     root = runtime.root
     band = f"band_{index + 1}"
     folder = root / band
     if (folder / "complete.json").exists():
         return _checkpoint(runtime, index)[1]
     initial, prior = _checkpoint(runtime, index - 1) if index else (None, None)
-    records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior, encode_positions)
+    raw_root = None
+    if index == 0 and raw_band1 is not None:
+        records, goals, condition = _reuse_band1(runtime, manifest, raw_band1)
+        raw_root = raw_band1["root"]
+    else:
+        records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior, encode_positions)
     rows = []
     for record in records:
-        saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps)
+        saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps, raw_root=raw_root)
         rows.append(dict(case=record["case"], success=record["success"],
                          **saved["stats"], retained_positions=saved["positions"].tolist()))
 
@@ -274,7 +330,7 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
     return report
 
 
-def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_map=False):
+def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_map=False, filename="comparison.json"):
     points = design["points"]
     goal_ids = design["goal_ids"]
     nx, ny = len(design["grid"]["xs"]), len(design["grid"]["ys"])
@@ -303,7 +359,7 @@ def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_ma
                   grid=design["grid"], heldout_mask=design["heldout_mask"])
     if full_half_map:
         report["legacy_methods"] = legacy_methods
-    write_json(runtime.root / "comparison.json", report)
+    write_json(runtime.root / filename, report)
     return report
 
 
@@ -313,6 +369,7 @@ def main(argv=None):
     for field in ("source-run", "output-dir", "world-model-checkpoint", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int)
+    parser.add_argument("--band1-source", type=Path, help="Reuse the completed rollouts of a matching raw Band 1 run.")
     parser.add_argument("--starts-per-goal", type=int, default=6)
     planner_lengths = range(1, PLANNING["planning_horizon"] + 1)
     parser.add_argument("--actions-per-plan", type=int, choices=planner_lengths)
@@ -335,8 +392,10 @@ def main(argv=None):
         label_filter = _temporal_filter if args.labels == "temporal" else _filter
     if args.operation == "stage" and args.band not in range(1, len(bands) + 1):
         parser.error(f"stage requires --band between 1 and {len(bands)}")
-    if args.operation == "collect-raw" and args.band not in (None, 1):
-        parser.error("collect-raw runs band 1 only")
+    if args.operation == "compare" and args.band is not None and args.band not in range(1, len(bands) + 1):
+        parser.error(f"compare --band must be between 1 and {len(bands)}")
+    if args.operation == "collect-raw" and (args.band not in (None, 1) or args.band1_source is not None):
+        parser.error("collect-raw generates its own Band 1 rollouts")
     if (args.actions_per_plan or PLANNING["actions_per_plan"]) > (args.planning_horizon or PLANNING["planning_horizon"]):
         parser.error("actions-per-plan cannot exceed planning-horizon")
     args.output_dir, source = locations(args.output_dir, args.source_run,
@@ -357,8 +416,13 @@ def main(argv=None):
         kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
     config = dict(kind=kind, manifest=manifest, handcrafted=snapshot,
                   fitting=fitting, scale=source_config["scale"])
+    raw_band1 = None
     if args.operation == "collect-raw":
         config["purpose"] = "raw_band_1"
+    elif args.band1_source is not None:
+        _, raw_source = locations(args.output_dir, args.band1_source)
+        raw_band1 = _read_raw_band1(raw_source, config)
+        config["band1_source"] = raw_band1["provenance"]
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
         raise ValueError("experiment configuration changed; choose a new output directory")
@@ -378,8 +442,10 @@ def main(argv=None):
             return records
         if args.operation == "stage":
             return collect_and_fit(runtime, manifest, design, fitting, config["scale"], args.band - 1,
-                                   filter_steps=label_filter)
-        return compare(runtime, design, handcrafted, band_count=len(bands), full_half_map=half_square)
+                                   filter_steps=label_filter, raw_band1=raw_band1)
+        filename = "comparison.json" if args.band is None else f"band_{args.band}_comparison.json"
+        return compare(runtime, design, handcrafted, band_count=args.band or len(bands),
+                       full_half_map=half_square, filename=filename)
     finally:
         runtime.close()
 
