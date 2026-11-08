@@ -9,8 +9,8 @@ HALF_WIDTHS = (6, 12, 18, 24, 30, 36, 42, 46)
 BANDS = tuple(zip((0, *HALF_WIDTHS[:-1]), HALF_WIDTHS))
 
 
-def training_nodes(goal):
-    for band, (inner, outer) in enumerate(BANDS):
+def training_nodes(goal, *, bands=BANDS):
+    for band, (inner, outer) in enumerate(bands):
         offsets = range(-outer, outer + 1, SPACING)
         for y in offsets:
             for x in offsets:
