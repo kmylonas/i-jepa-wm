@@ -37,8 +37,8 @@ def test_full_right_room_filter_keeps_far_reversals_only_in_successes():
     assert half.filter_steps(dict(raw, success=False), case, design, 8)[0] == []
 
 
-@pytest.mark.parametrize("operation,horizon", [("stage", 5), ("collect-raw", 1)])
-def test_execution_stride_changes_planning_only(monkeypatch, tmp_path, operation, horizon):
+@pytest.mark.parametrize("operation,horizon,wide", [("stage", 5, False), ("collect-raw", 1, False), ("stage", 1, True)])
+def test_execution_stride_changes_planning_only(monkeypatch, tmp_path, operation, horizon, wide):
     from src.mylonas_ijepa_wm import experience_curriculum as exp
 
     points = [[50, 42], [44, 40], [53, 48], [44, 20], [50, 12], [55, 14]]
@@ -65,13 +65,31 @@ def test_execution_stride_changes_planning_only(monkeypatch, tmp_path, operation
 
     monkeypatch.setattr(exp, "collect_and_fit", fit_stage)
     monkeypatch.setattr(exp, "_collect_band", raw_stage, raising=False)
-    horizon_args = ["--planning-horizon", str(horizon)] if operation == "collect-raw" else []
+    extra = ["--planning-horizon", str(horizon)]
+    if wide:
+        extra.append("--wide-square-bands")
     exp.main([operation, "--sampling", "half-square", "--labels", "temporal", "--band", "1",
-              "--actions-per-plan", "1", *horizon_args, "--device", "cpu", "--output-dir", str(tmp_path/"out"),
+              "--actions-per-plan", "1", *extra, "--device", "cpu", "--output-dir", str(tmp_path/"out"),
               "--source-run", str(tmp_path/"source"), "--encoder-checkpoint", str(tmp_path/"encoder"),
               "--world-model-checkpoint", str(tmp_path/"wm"), "--dino-wm-root", str(tmp_path/"dino")])
-    original = half.make_manifest(design)
+    original = half.make_manifest(design, bands=half.WIDE_BANDS if wide else half.BANDS)
     assert original["planning"]["actions_per_plan"] == 5
     original["planning"]["actions_per_plan"] = 1
     original["planning"]["planning_horizon"] = horizon
     assert called == [(operation, original)]
+
+
+
+def test_wider_square_bands_keep_the_exact_band_one_starts():
+    points = [[50, 42], [44, 40], [53, 48], [44, 20], [50, 12], [55, 14]]
+    design = dict(points=points, train_ids=list(range(len(points))))
+    original = half.make_manifest(design)
+    wide = half.make_manifest(design, bands=half.WIDE_BANDS)
+    assert wide["stages"][0] == original["stages"][0]
+    assert wide["goal_ids"] == original["goal_ids"]
+    assert wide["bands"] == [[lo, lo + 6] for lo in range(0, 48, 6)]
+    for (lo, hi), cases in zip(wide["bands"], wide["stages"]):
+        assert cases
+        for case in cases:
+            extent = np.abs(np.subtract(case["start"], case["goal"])).max()
+            assert lo < extent <= hi

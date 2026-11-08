@@ -1,6 +1,7 @@
 """Fit from a completed raw-only band without executing its cases again."""
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from src.mylonas_ijepa_wm import experience_curriculum as exp
@@ -11,7 +12,7 @@ from src.mylonas_ijepa_wm.curriculum_runtime import file_sha256, save_tensors
 def test_archived_band_one_is_read_only_and_keeps_the_original_goal_tokens(tmp_path):
     source, output = tmp_path/"source", tmp_path/"new"
     case = dict(case_id="b1_g00_s00", goal=[50, 42], goal_index=0)
-    manifest = dict(stages=[[case]], goal_ids=[0], pair_cap=8)
+    manifest = dict(stages=[[case]], bands=[[0, 6]], goal_ids=[0], pair_cap=8)
     config = dict(manifest=manifest)
     source_config = dict(config, purpose="raw_band_1")
     common = dict(models={}, dino_commit="pin", dino_source="hash", precision="fp32", encoder_batch_size=8)
@@ -28,12 +29,15 @@ def test_archived_band_one_is_read_only_and_keeps_the_original_goal_tokens(tmp_p
         raw_path="raw/episode.pt", raw_sha256=file_sha256(source/"raw/episode.pt")),
         condition=dict(collector="raw", goal_sha256=file_sha256(source/"collection_goals.pt")))
     before = {p.relative_to(source):file_sha256(p) for p in source.rglob("*") if p.is_file()}
-    archive = exp._read_raw_band1(source, config)
+    expanded = dict(manifest, bands=[[0, 6], [6, 12]], stages=[[case], []])
+    archive = exp._read_raw_band1(source, dict(config, manifest=expanded))
+    with pytest.raises(ValueError, match="saved raw collection differs"):
+        exp._read_raw_band1(source, dict(config, manifest=dict(expanded, stages=[[dict(case, goal=[51, 42])], []])))
     runtime = SimpleNamespace(root=output, runtime_id="current", device="cpu",
                               encode_frames=lambda frames:frames[:, None].float())
     write_json(output/"runtime.json", dict(signature=common))
     design = dict(points=[[50, 42]], goal_ids=[0], heldout_mask=[False], frame_sha256=["goal"])
-    report = exp.collect_and_fit(runtime, manifest, design, dict(updates=1, batch_size=2, bottleneck=2),
+    report = exp.collect_and_fit(runtime, expanded, design, dict(updates=1, batch_size=2, bottleneck=2),
                                  .1, 0, filter_steps=exp._temporal_filter, raw_band1=archive)
     assert report["retained_pairs"] == 2
     assert report["source_runtime_id"] == source_id

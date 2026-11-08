@@ -1,5 +1,6 @@
 """Fit a multi-goal ranking cost from real planner rollouts in expanding annuli."""
 import argparse
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -231,11 +232,16 @@ def _collect_band(runtime, manifest, design, index, initial, prior, encode_posit
 def _read_raw_band1(root, config):
     manifest = config["manifest"]
     source_config = read(root / "experiment.json")
-    if source_config != dict(config, purpose="raw_band_1"):
+    source_manifest = source_config["manifest"]
+    # Later expansion bands can change independently of the archived first band.
+    expected_manifest = dict(manifest, stages=source_manifest["stages"], bands=source_manifest["bands"])
+    if (source_config != dict(config, manifest=expected_manifest, purpose="raw_band_1")
+            or manifest["stages"][0] != source_manifest["stages"][0]
+            or manifest["bands"][0] != source_manifest["bands"][0]):
         raise ValueError("saved raw collection differs in its cases, planner settings or inputs")
     saved = read(root / "runtime.json")
     signature, source_id = saved["signature"], saved["runtime_id"]
-    if (source_id != digest(signature) or signature["manifest"] != digest(manifest)
+    if (source_id != digest(signature) or signature["manifest"] != digest(source_manifest)
             or signature["runtime_variant"]["experiment_digest"] != digest(source_config)):
         raise ValueError("saved raw runtime provenance differs")
     stage = read(root / "stages" / "band_1.json")
@@ -376,15 +382,18 @@ def main(argv=None):
     parser.add_argument("--planning-horizon", type=int, choices=planner_lengths)
     parser.add_argument("--labels", choices=("progress", "temporal"), default="progress")
     parser.add_argument("--sampling", choices=("radial", "half-square"), default="radial")
+    parser.add_argument("--wide-square-bands", action="store_true", help="Use 6-unit square strips to half-width 48.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
     half_square = args.sampling == "half-square"
+    if args.wide_square_bands and not half_square:
+        parser.error("wide-square-bands requires half-square sampling")
     if half_square:
         if args.labels != "temporal":
             parser.error("half-square sampling requires temporal labels")
         from src.mylonas_ijepa_wm import experience_half_square
-        bands = experience_half_square.BANDS
-        build_manifest = experience_half_square.make_manifest
+        bands = experience_half_square.WIDE_BANDS if args.wide_square_bands else experience_half_square.BANDS
+        build_manifest = partial(experience_half_square.make_manifest, bands=bands)
         label_filter = experience_half_square.filter_steps
     else:
         bands = BANDS
