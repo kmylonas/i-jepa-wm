@@ -184,6 +184,17 @@ def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root
     return payload
 
 
+def repeat_manifest(first, later):
+    """Interleave independently sampled batches in physical band order."""
+    batches = [first["stages"], *(manifest["stages"] for manifest in later)]
+    stages = [
+        [dict(case, case_id=f"{case['case_id']}_r{number}", round=number) for case in cases]
+        for band in zip(*batches, strict=True)
+        for number, cases in enumerate(band, 1)
+    ]
+    return dict(first, stages=stages, rounds_per_band=len(batches))
+
+
 def _stage_name(index, rounds=1):
     band, number = divmod(index, rounds)
     return f"band_{band + 1}_round_{number + 1}" if rounds > 1 else f"band_{band + 1}"
@@ -310,7 +321,8 @@ def _reuse_band1(runtime, manifest, archive):
 
 
 def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
-                    filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None):
+                    filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None,
+                    summarize_round_episode=None):
     root = runtime.root
     rounds = manifest.get("rounds_per_band", 1)
     band_number, round_number = divmod(index, rounds)
@@ -334,8 +346,12 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
             row["exploration"] = experience_exploration.measure(
                 record, manifest["bands"][band_number][0], runtime.config.actions_per_model_step)
         elif rounds > 1:
-            row["boundary"] = experience_exploration.measure(
-                record, manifest["bands"][band_number][0], runtime.config.actions_per_model_step)
+            inner = manifest["bands"][band_number][0]
+            macro_steps = runtime.config.actions_per_model_step
+            if summarize_round_episode is None:
+                row["boundary"] = experience_exploration.measure(record, inner, macro_steps)
+            else:
+                row.update(summarize_round_episode(record, saved, inner, macro_steps))
         rows.append(row)
 
     new_pairs = sum(r["retained_pairs"] for r in rows)

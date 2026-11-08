@@ -38,3 +38,34 @@ def test_crossing_requires_reaching_the_other_room_through_the_opening():
     assert square.crossings([[40, 30], [33, 30], [31, 30], [23, 30]]) == ["right_to_left"]
     assert square.crossings([[24, 30], [33, 30], [28, 30]]) == []
     assert square.crossings([[24, 15], [40, 15]]) == []
+
+
+def test_temporal_rounds_keep_full_map_goals_and_first_batch():
+    old = square.make_manifest()
+    current = square.make_repeated_manifest(6, rounds=3)
+    assert current == square.make_repeated_manifest(6, rounds=3)
+    assert current["goals"] == old["goals"] and current["bands"] == old["bands"]
+    assert len(current["stages"]) == 24
+    assert sum(map(len, current["stages"])) == 810
+    for i, batch in enumerate(old["stages"]):
+        first, second, third = current["stages"][i * 3:i * 3 + 3]
+        assert [(c["start"], c["goal"], c["seed"]) for c in first] == [
+            (c["start"], c["goal"], c["seed"]) for c in batch
+        ]
+        all_starts = [tuple(c["start"]) for c in first + second + third]
+        assert len(all_starts) == len(set(all_starts))
+    assert current["planning"]["planning_horizon"] == current["planning"]["actions_per_plan"] == 1
+
+
+def test_temporal_labels_keep_both_directions_and_exclude_failed_rollouts():
+    xy = [[24, 30], [31, 30], [33, 30], [39, 30], [39, 25], [37, 25]]
+    raw = dict(states=torch.tensor(xy), primitive_steps=torch.arange(len(xy)),
+               frames=torch.arange(len(xy))[:, None], success=True)
+    design = dict(points=[[48, 30]], goal_ids=[], heldout_mask=[False], frame_sha256=["goal"])
+    case = dict(goal=[48, 30], goal_id=0, route="left_to_right")
+    assert square.temporal_filter(raw, case, design, 8)[0] == [0, 1, 2, 3, 4]
+    assert square.temporal_filter(dict(raw, success=False), case, design, 8)[0] == []
+    summary = square.summarize_round_episode(dict(case=case, primitive_positions=xy), {}, 16, 5)
+    assert summary["reached_other_room"]
+    assert summary["crossings"] == ["left_to_right"]
+    assert summary["boundary"]["first_entry_step"] == 2

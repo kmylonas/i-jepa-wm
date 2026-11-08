@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from src.mylonas_ijepa_wm import experience_curriculum as experience
+from src.mylonas_ijepa_wm import experience_exploration
 from src.mylonas_ijepa_wm import geodesic_radial as wall
 from src.mylonas_ijepa_wm import geodesic_multigoal as metrics
 from src.mylonas_ijepa_wm import geodesic_square as square
@@ -48,13 +49,15 @@ def _rectangles(goal, inner, outer, *, regions=None):
     return np.asarray(rectangles).reshape(-1, 2, 2)
 
 
-def make_manifest(starts_per_goal=6):
+def make_manifest(starts_per_goal=6, *, round_seed=0):
     if starts_per_goal < 1:
         raise ValueError("starts per goal must be positive")
     rng = np.random.default_rng(SEED)
     # Three randomly drawn targets in each room, one in each vertical third.
     goals = [rng.uniform([left, y], [right, y + 16]).tolist()
              for left, right in ((8, 24), (40, 56)) for y in (8, 24, 40)]
+    if round_seed:
+        rng = np.random.default_rng([SEED, round_seed])
     stages = []
     for index, (inner, outer) in enumerate(BANDS):
         cases = []
@@ -79,6 +82,13 @@ def make_manifest(starts_per_goal=6):
         stages.append(cases)
     return dict(bands=[list(b) for b in BANDS], goals=goals, goal_ids=list(range(len(goals))), stages=stages,
                 starts_per_goal=starts_per_goal, planning=dict(PLANNING), seed=SEED, pair_cap=experience.PAIR_CAP)
+
+
+def make_repeated_manifest(starts_per_goal, *, rounds):
+    first = make_manifest(starts_per_goal)
+    first["planning"].update(planning_horizon=1, actions_per_plan=1)
+    later = (make_manifest(starts_per_goal, round_seed=number) for number in range(1, rounds))
+    return experience.repeat_manifest(first, later)
 
 
 def _doorway_step(a, b):
@@ -120,6 +130,26 @@ def filter_steps(raw, case, design, cap):
     return selected, stats
 
 
+def _legal_positions(xy):
+    return np.asarray([wall.valid(point) for point in xy], dtype=bool)
+
+
+def temporal_filter(raw, case, design, cap):
+    return experience._temporal_filter(raw, case, design, cap, domain=_legal_positions)
+
+
+def summarize_round_episode(record, saved, inner, macro_steps):
+    events = crossings(record["primitive_positions"])
+    retained = saved.get("pairs", ())
+    xy = np.asarray(saved.get("positions", []))
+    return dict(
+        crossings=events,
+        reached_other_room=record["case"]["route"] in events,
+        retained_doorway_pairs=sum(_doorway_step(xy[a], xy[b]) for a, b in retained),
+        boundary=experience_exploration.measure(record, inner, macro_steps, right_room_only=False),
+    )
+
+
 def make_design(runtime, manifest):
     train = manifest["goals"]
     goals = [*train, *[list(g) for g in metrics.TEST_GOALS]]
@@ -154,7 +184,7 @@ def make_design(runtime, manifest):
     return design
 
 
-def compare(runtime, manifest, design):
+def compare(runtime, manifest, design, *, band_count=None):
     points = np.asarray(design["points"])
     goals = design["goal_ids"]
     tokens = experience._encode_positions(runtime, design, list(range(len(points))))
@@ -170,13 +200,20 @@ def compare(runtime, manifest, design):
     edges = np.asarray([(a, b) for a, b in neighbors if a is not None and b is not None and mask[a] and mask[b]
                         and wall._visible(points[a], points[b])], dtype=int).reshape(-1, 2)
     stages = []
-    for i, (_, outer) in enumerate(manifest["bands"]):
-        adapter, report = experience._checkpoint(runtime, i)
+    rounds = manifest.get("rounds_per_band", 1)
+    bands = manifest["bands"][:band_count]
+    for i in range(len(bands) * rounds):
+        band, number = divmod(i, rounds)
+        _, outer = bands[band]
+        adapter, report = experience._checkpoint(runtime, i, rounds)
         adapted = _scores(adapter, tokens, goals, runtime.device)
         by_goal = [metrics._goal_report(design, g, truth[j], extent[j], raw[j], adapted[j], mask, edges, j, outer)
                    for j, g in enumerate(goals)]
-        stages.append(dict(band=i + 1, half_width=outer, collection=report["collection"],
-                           updates=report["updates"], by_goal=by_goal))
+        stage = dict(band=band + 1, half_width=outer, collection=report["collection"],
+                     updates=report["updates"], by_goal=by_goal)
+        if rounds > 1:
+            stage["round"] = number + 1
+        stages.append(stage)
     result = dict(axis=design["axis"], goals=points[goals].tolist(), stages=stages,
                   heldout_grid_points=int(sum(mask[i] for i in design["grid"] if i is not None)),
                   raw_grid=[[None if i is None else float(row[i]) for i in design["grid"]] for row in raw],
@@ -192,14 +229,24 @@ def main(argv=None):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int, choices=range(1, len(BANDS) + 1))
     parser.add_argument("--starts-per-goal", type=int, default=6)
+    parser.add_argument("--rounds-per-band", type=int, default=1,
+                        help="Use two or more rounds for one-macro MPC with success-only temporal labels.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
     if args.operation == "stage" and args.band is None:
         parser.error("stage requires --band")
+    rounds = args.rounds_per_band
+    if rounds < 1:
+        parser.error("--rounds-per-band must be positive")
     args.output_dir, _ = locations(args.output_dir, args.encoder_checkpoint,
                                    (args.world_model_checkpoint, args.dino_wm_root))
-    manifest = make_manifest(args.starts_per_goal)
-    config = dict(kind="experience_square_v1", manifest=manifest, fitting=FITTING)
+    if rounds > 1:
+        manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds)
+        kind = "experience_mpc_repeated_full_square_v1"
+    else:
+        manifest = make_manifest(args.starts_per_goal)
+        kind = "experience_square_v1"
+    config = dict(kind=kind, manifest=manifest, fitting=FITTING)
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
         raise ValueError("experiment configuration changed; choose a new output directory")
@@ -215,9 +262,15 @@ def main(argv=None):
     try:
         design = make_design(runtime, manifest)
         if args.operation == "stage":
-            return experience.collect_and_fit(runtime, manifest, design, FITTING, None, args.band - 1,
-                                              filter_steps=filter_steps)
-        return compare(runtime, manifest, design)
+            first = (args.band - 1) * rounds
+            for index in range(first, first + rounds):
+                result = experience.collect_and_fit(
+                    runtime, manifest, design, FITTING, None, index,
+                    filter_steps=temporal_filter if rounds > 1 else filter_steps,
+                    summarize_round_episode=summarize_round_episode if rounds > 1 else None,
+                )
+            return result
+        return compare(runtime, manifest, design, band_count=args.band)
     finally:
         runtime.close()
 

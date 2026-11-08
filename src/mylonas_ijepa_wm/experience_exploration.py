@@ -21,12 +21,14 @@ def configure(manifest, probability, success_quota):
             )
 
 
-def measure(record, inner, macro_steps):
+def measure(record, inner, macro_steps, *, right_room_only=True):
     xy = np.asarray(record["primitive_positions"])
     offsets = xy - record["case"]["goal"]
     distance = np.linalg.norm(offsets, axis=1)
     extent = np.abs(offsets).max(axis=1)
-    inside = (extent[1:] <= inner + 1e-6) & (xy[1:, 0] > WALL_RIGHT)
+    inside = extent[1:] <= inner + 1e-6
+    if right_room_only:
+        inside &= xy[1:, 0] > WALL_RIGHT
     entries = np.flatnonzero(inside) if inner else []
     first_entry = int(entries[0] + 1) if len(entries) else None
     prefix = record.get("prefix_steps", 0)

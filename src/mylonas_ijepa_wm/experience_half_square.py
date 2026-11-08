@@ -47,16 +47,9 @@ def make_manifest(design, starts_per_goal=6, *, bands=BANDS, seed=experience.SEE
 
 def make_repeated_manifest(design, starts_per_goal, *, bands, rounds):
     first = make_manifest(design, starts_per_goal, bands=bands)
-    batches = [first["stages"]]
-    for number in range(1, rounds):
-        other = make_manifest(design, starts_per_goal, bands=bands, seed=[experience.SEED, number])
-        batches.append(other["stages"])
-    stages = [
-        [dict(case, case_id=f"{case['case_id']}_r{number}", round=number) for case in cases]
-        for band in zip(*batches)
-        for number, cases in enumerate(band, 1)
-    ]
-    return dict(first, stages=stages, rounds_per_band=rounds)
+    later = (make_manifest(design, starts_per_goal, bands=bands, seed=[experience.SEED, number])
+             for number in range(1, rounds))
+    return experience.repeat_manifest(first, later)
 
 
 def _right_room(xy):
