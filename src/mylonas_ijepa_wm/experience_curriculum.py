@@ -149,7 +149,7 @@ def _encode_positions(runtime, design, ids):
 
 def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root=None):
     case = record["case"]
-    if record["raw_path"] is None and not record["success"] and "exploration" in manifest:
+    if record["raw_path"] is None and not record["success"] and "primitive_positions" in record:
         xy = np.asarray(record["primitive_positions"])
         return dict(stats=_failed_temporal_stats(xy), positions=torch.empty((0, 2)))
     root = runtime.root
@@ -184,11 +184,22 @@ def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root
     return payload
 
 
-def _checkpoint(runtime, index):
-    root = runtime.root / f"band_{index + 1}"
+def _stage_name(index, rounds=1):
+    band, number = divmod(index, rounds)
+    return f"band_{band + 1}_round_{number + 1}" if rounds > 1 else f"band_{band + 1}"
+
+
+def _checkpoint(runtime, index, rounds=1):
+    name = _stage_name(index, rounds)
+    root = runtime.root / name
     report = read(root / "complete.json")
-    if report["runtime_id"] != runtime.runtime_id or report["checkpoint_sha256"] != file_sha256(root / "adapter.pt"):
-        raise ValueError(f"checkpoint provenance differs in band {index + 1}")
+    checksum = report["checkpoint_sha256"]
+    if report["runtime_id"] != runtime.runtime_id:
+        raise ValueError(f"checkpoint provenance differs in {name}")
+    if rounds > 1 and checksum is None and report["updates"] == 0 and report["collector"] == "raw":
+        return None, report
+    if checksum != file_sha256(root / "adapter.pt"):
+        raise ValueError(f"checkpoint provenance differs in {name}")
     adapter, _ = load_adapter(root / "adapter.pt", runtime.device, expected_runtime_id=runtime.runtime_id)
     return adapter, report
 
@@ -216,7 +227,8 @@ def _initial_scale(tokens, population):
 
 def _collect_band(runtime, manifest, design, index, initial, prior, encode_positions):
     root = runtime.root
-    band = f"band_{index + 1}"
+    rounds = manifest.get("rounds_per_band", 1)
+    band = _stage_name(index, rounds)
     goal_path = root / "collection_goals.pt"
     if not goal_path.exists():
         save_tensors(goal_path, dict(runtime_id=runtime.runtime_id,
@@ -227,13 +239,14 @@ def _collect_band(runtime, manifest, design, index, initial, prior, encode_posit
     goals = payload["tokens"]
     targets = goals.to(runtime.device)
     scorers = [adapter_goal_cost(initial, t) if initial is not None else _raw_cost(t) for t in targets]
-    condition = dict(goal_sha256=file_sha256(goal_path), collector=prior["checkpoint_sha256"] if prior else "raw")
+    condition = dict(goal_sha256=file_sha256(goal_path), collector=prior["checkpoint_sha256"] if initial is not None else "raw")
 
     exploration = manifest.get("exploration")
 
     def execute(case):
-        options = (dict(initial_action=case["random_first_action"], capture_failures=False)
-                   if exploration else {})
+        options = dict(capture_failures=False) if exploration or rounds > 1 else {}
+        if exploration:
+            options["initial_action"] = case["random_first_action"]
         record = runtime.run_case(case, capture=True, latent_cost_fn=scorers[case["goal_index"]],
                                   journal_stage=band, **options)
         if record["raw_path"] is not None:
@@ -299,11 +312,13 @@ def _reuse_band1(runtime, manifest, archive):
 def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
                     filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None):
     root = runtime.root
-    band = f"band_{index + 1}"
+    rounds = manifest.get("rounds_per_band", 1)
+    band_number, round_number = divmod(index, rounds)
+    band = _stage_name(index, rounds)
     folder = root / band
     if (folder / "complete.json").exists():
-        return _checkpoint(runtime, index)[1]
-    initial, prior = _checkpoint(runtime, index - 1) if index else (None, None)
+        return _checkpoint(runtime, index, rounds)[1]
+    initial, prior = _checkpoint(runtime, index - 1, rounds) if index else (None, None)
     raw_root = None
     if index == 0 and raw_band1 is not None:
         records, goals, condition = _reuse_band1(runtime, manifest, raw_band1)
@@ -317,7 +332,10 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
                    **saved["stats"], retained_positions=saved["positions"].tolist())
         if "exploration" in manifest:
             row["exploration"] = experience_exploration.measure(
-                record, manifest["bands"][index][0], runtime.config.actions_per_model_step)
+                record, manifest["bands"][band_number][0], runtime.config.actions_per_model_step)
+        elif rounds > 1:
+            row["boundary"] = experience_exploration.measure(
+                record, manifest["bands"][band_number][0], runtime.config.actions_per_model_step)
         rows.append(row)
 
     new_pairs = sum(r["retained_pairs"] for r in rows)
@@ -326,7 +344,7 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
         scale = prior["scale"]
     if new_pairs:
         token_parts, population, offset = [goals.half()], [], len(goals)
-        earlier = [read(root / f"band_{i + 1}" / "complete.json")["collection"] for i in range(index)]
+        earlier = [read(root / _stage_name(i, rounds) / "complete.json")["collection"] for i in range(index)]
         for stage_rows in (*earlier, rows):
             for row in stage_rows:
                 if not row["retained_pairs"]:
@@ -342,16 +360,21 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
             scale = _initial_scale(tokens, population)
         adapter, training = fit(tokens, population, scale, **fitting, device=runtime.device,
                                 initial_adapter=initial, progress=lambda row: print(row, flush=True))
-    elif initial is not None:
-        adapter, training = initial, dict(updates=0, reason="no eligible pairs in this band")
+    elif initial is not None or rounds > 1:
+        adapter, training = initial, dict(updates=0, reason="no eligible pairs in this collection batch")
     else:
         write_json(folder / "collection.json", rows)
         raise ValueError("first band yielded no eligible transitions; see band_1/collection.json")
-    lineage = dict(runtime_id=runtime.runtime_id, band=index + 1, **condition)
-    save_adapter(folder / "adapter.pt", adapter, training, lineage)
+    lineage = dict(runtime_id=runtime.runtime_id, band=band_number + 1, **condition)
+    if rounds > 1:
+        lineage["round"] = round_number + 1
+    checksum = None
+    if adapter is not None:
+        save_adapter(folder / "adapter.pt", adapter, training, lineage)
+        checksum = file_sha256(folder / "adapter.pt")
     write_json(folder / "training.json", training)
     report = dict(**lineage, collection=rows, retained_pairs=new_pairs, updates=training["updates"],
-                  checkpoint_sha256=file_sha256(folder / "adapter.pt"))
+                  checkpoint_sha256=checksum)
     if derive_scale:
         report["scale"] = scale
     write_json(folder / "complete.json", report)
@@ -360,7 +383,8 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
     return report
 
 
-def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_map=False, filename="comparison.json"):
+def compare(runtime, design, handcrafted, *, band_count=len(BANDS), rounds=1,
+            full_half_map=False, filename="comparison.json"):
     points = design["points"]
     goal_ids = design["goal_ids"]
     nx, ny = len(design["grid"]["xs"]), len(design["grid"]["ys"])
@@ -370,14 +394,15 @@ def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_ma
     tokens = _encode_positions(runtime, design, list(range(len(points))))
     raw = _scores(None, tokens, goal_ids, runtime.device)
     methods, legacy_methods, checkpoints = {}, {}, {}
-    for name in ("raw", "handcrafted", *(f"band_{i + 1}" for i in range(band_count))):
+    names = [_stage_name(i, rounds) for i in range(band_count * rounds)]
+    for index, name in enumerate(("raw", "handcrafted", *names), start=-2):
         if name == "raw":
             costs = raw
         else:
             if name == "handcrafted":
                 adapter = handcrafted
             else:
-                adapter, checkpoints[name] = _checkpoint(runtime, int(name.split("_")[1]) - 1)
+                adapter, checkpoints[name] = _checkpoint(runtime, index, rounds)
             costs = _scores(adapter, tokens, goal_ids, runtime.device)
         legacy = ordinal_rows(points, goals, raw, costs, design["heldout_mask"], edges)
         if full_half_map:
@@ -402,6 +427,7 @@ def main(argv=None):
     parser.add_argument("--band1-source", type=Path, help="Reuse the completed rollouts of a matching raw Band 1 run.")
     parser.add_argument("--starts-per-goal", type=int, default=6,
                         help="Number of starts per goal, or attempt cap with a success quota.")
+    parser.add_argument("--rounds-per-band", type=int, default=1)
     parser.add_argument("--random-first-probability", type=float, default=0.)
     parser.add_argument("--success-quota", type=int, help="Target successful MPC episodes per goal and band.")
     planner_lengths = range(1, PLANNING["planning_horizon"] + 1)
@@ -413,6 +439,12 @@ def main(argv=None):
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
     half_square = args.sampling == "half-square"
+    rounds = args.rounds_per_band
+    if rounds < 1:
+        parser.error("--rounds-per-band must be positive")
+    if rounds > 1 and (not half_square or args.success_quota is not None
+                       or args.band1_source is not None or args.operation == "collect-raw"):
+        parser.error("multiple rounds require fresh half-square collection without a success quota")
     if args.success_quota is not None:
         if (not half_square or args.band1_source is not None or args.operation == "collect-raw"
                 or not 1 <= args.success_quota <= args.starts_per_goal
@@ -427,7 +459,10 @@ def main(argv=None):
             parser.error("half-square sampling requires temporal labels")
         from src.mylonas_ijepa_wm import experience_half_square
         bands = experience_half_square.WIDE_BANDS if args.wide_square_bands else experience_half_square.BANDS
-        build_manifest = partial(experience_half_square.make_manifest, bands=bands)
+        if rounds > 1:
+            build_manifest = partial(experience_half_square.make_repeated_manifest, bands=bands, rounds=rounds)
+        else:
+            build_manifest = partial(experience_half_square.make_manifest, bands=bands)
         label_filter = experience_half_square.filter_steps
     else:
         bands = BANDS
@@ -457,6 +492,8 @@ def main(argv=None):
         kind = "experience_temporal_half_square_v1"
     else:
         kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
+    if rounds > 1:
+        kind = "experience_mpc_repeated_half_square_v1"
     if args.success_quota is not None:
         experience_exploration.configure(manifest, args.random_first_probability, args.success_quota)
         kind = "experience_random_first_half_square_v1"
@@ -487,10 +524,13 @@ def main(argv=None):
             print(f"Raw band 1: {sum(r['success'] for r in records)}/{len(records)} successful", flush=True)
             return records
         if args.operation == "stage":
-            return collect_and_fit(runtime, manifest, design, fitting, config["scale"], args.band - 1,
-                                   filter_steps=label_filter, raw_band1=raw_band1)
+            first = (args.band - 1) * rounds
+            for index in range(first, first + rounds):
+                report = collect_and_fit(runtime, manifest, design, fitting, config["scale"], index,
+                                         filter_steps=label_filter, raw_band1=raw_band1)
+            return report
         filename = "comparison.json" if args.band is None else f"band_{args.band}_comparison.json"
-        return compare(runtime, design, handcrafted, band_count=args.band or len(bands),
+        return compare(runtime, design, handcrafted, band_count=args.band or len(bands), rounds=rounds,
                        full_half_map=half_square, filename=filename)
     finally:
         runtime.close()

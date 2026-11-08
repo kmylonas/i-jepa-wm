@@ -12,10 +12,10 @@ BANDS = tuple(zip((0, *HALF_WIDTHS[:-1]), HALF_WIDTHS))
 RESET_REGION = (35.01, 56.5, 7.5, 56.5)
 
 
-def make_manifest(design, starts_per_goal=6, *, bands=BANDS):
+def make_manifest(design, starts_per_goal=6, *, bands=BANDS, seed=experience.SEED):
     if starts_per_goal < 1:
         raise ValueError("starts per goal must be positive")
-    rng = np.random.default_rng(experience.SEED)
+    rng = np.random.default_rng(seed)
     points = np.asarray(design["points"])
     goals = experience._goal_ids(design)
     stages = []
@@ -43,6 +43,20 @@ def make_manifest(design, starts_per_goal=6, *, bands=BANDS):
     return dict(bands=[list(b) for b in bands], goal_ids=goals, stages=stages, starts_per_goal=starts_per_goal,
                 planning=dict(PLANNING), seed=experience.SEED, pair_cap=experience.PAIR_CAP,
                 reset_region=list(RESET_REGION))
+
+
+def make_repeated_manifest(design, starts_per_goal, *, bands, rounds):
+    first = make_manifest(design, starts_per_goal, bands=bands)
+    batches = [first["stages"]]
+    for number in range(1, rounds):
+        other = make_manifest(design, starts_per_goal, bands=bands, seed=[experience.SEED, number])
+        batches.append(other["stages"])
+    stages = [
+        [dict(case, case_id=f"{case['case_id']}_r{number}", round=number) for case in cases]
+        for band in zip(*batches)
+        for number, cases in enumerate(band, 1)
+    ]
+    return dict(first, stages=stages, rounds_per_band=rounds)
 
 
 def _right_room(xy):

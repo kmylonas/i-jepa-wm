@@ -31,7 +31,7 @@ def measure(record, inner, macro_steps):
     first_entry = int(entries[0] + 1) if len(entries) else None
     prefix = record.get("prefix_steps", 0)
     return dict(
-        arm="random first" if record["case"]["random_first_action"] is not None else "MPC first",
+        arm="random first" if record["case"].get("random_first_action") is not None else "MPC first",
         prefix_steps=prefix,
         first_entry_step=first_entry,
         entered_by_first_action=first_entry == 1,
