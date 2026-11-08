@@ -198,14 +198,9 @@ def _initial_scale(tokens, population):
     return float(positive.median())
 
 
-def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
-                    filter_steps=_filter, encode_positions=_encode_positions):
+def _collect_band(runtime, manifest, design, index, initial, prior, encode_positions):
     root = runtime.root
     band = f"band_{index + 1}"
-    folder = root / band
-    if (folder / "complete.json").exists():
-        return _checkpoint(runtime, index)[1]
-    initial, prior = _checkpoint(runtime, index - 1) if index else (None, None)
     goal_path = root / "collection_goals.pt"
     if not goal_path.exists():
         save_tensors(goal_path, dict(runtime_id=runtime.runtime_id,
@@ -224,6 +219,18 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
         return record
 
     records = run_stage(root, band, manifest["stages"][index], runtime.runtime_id, execute, condition=condition)
+    return records, goals, condition
+
+
+def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
+                    filter_steps=_filter, encode_positions=_encode_positions):
+    root = runtime.root
+    band = f"band_{index + 1}"
+    folder = root / band
+    if (folder / "complete.json").exists():
+        return _checkpoint(runtime, index)[1]
+    initial, prior = _checkpoint(runtime, index - 1) if index else (None, None)
+    records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior, encode_positions)
     rows = []
     for record in records:
         saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps)
@@ -302,12 +309,14 @@ def compare(runtime, design, handcrafted, *, band_count=len(BANDS), full_half_ma
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("stage", "compare"))
+    parser.add_argument("operation", choices=("stage", "compare", "collect-raw"))
     for field in ("source-run", "output-dir", "world-model-checkpoint", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int)
     parser.add_argument("--starts-per-goal", type=int, default=6)
-    parser.add_argument("--actions-per-plan", type=int, choices=range(1, PLANNING["planning_horizon"] + 1))
+    planner_lengths = range(1, PLANNING["planning_horizon"] + 1)
+    parser.add_argument("--actions-per-plan", type=int, choices=planner_lengths)
+    parser.add_argument("--planning-horizon", type=int, choices=planner_lengths)
     parser.add_argument("--labels", choices=("progress", "temporal"), default="progress")
     parser.add_argument("--sampling", choices=("radial", "half-square"), default="radial")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
@@ -326,6 +335,10 @@ def main(argv=None):
         label_filter = _temporal_filter if args.labels == "temporal" else _filter
     if args.operation == "stage" and args.band not in range(1, len(bands) + 1):
         parser.error(f"stage requires --band between 1 and {len(bands)}")
+    if args.operation == "collect-raw" and args.band not in (None, 1):
+        parser.error("collect-raw runs band 1 only")
+    if (args.actions_per_plan or PLANNING["actions_per_plan"]) > (args.planning_horizon or PLANNING["planning_horizon"]):
+        parser.error("actions-per-plan cannot exceed planning-horizon")
     args.output_dir, source = locations(args.output_dir, args.source_run,
                                       (args.world_model_checkpoint, args.encoder_checkpoint, args.dino_wm_root))
     handcrafted, snapshot, design = load_ranking_source(source)
@@ -336,12 +349,16 @@ def main(argv=None):
     manifest = build_manifest(design, args.starts_per_goal)
     if args.actions_per_plan is not None:
         manifest["planning"]["actions_per_plan"] = args.actions_per_plan
+    if args.planning_horizon is not None:
+        manifest["planning"]["planning_horizon"] = args.planning_horizon
     if half_square:
         kind = "experience_temporal_half_square_v1"
     else:
         kind = "experience_temporal_v1" if args.labels == "temporal" else "experience_curriculum_v1"
     config = dict(kind=kind, manifest=manifest, handcrafted=snapshot,
                   fitting=fitting, scale=source_config["scale"])
+    if args.operation == "collect-raw":
+        config["purpose"] = "raw_band_1"
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
         raise ValueError("experiment configuration changed; choose a new output directory")
@@ -355,6 +372,10 @@ def main(argv=None):
     args.runtime_signature_extra = runtime_variant(config, "experience", args.device)
     runtime = PilotRuntime(args, manifest)
     try:
+        if args.operation == "collect-raw":
+            records, _, _ = _collect_band(runtime, manifest, design, 0, None, None, _encode_positions)
+            print(f"Raw band 1: {sum(r['success'] for r in records)}/{len(records)} successful", flush=True)
+            return records
         if args.operation == "stage":
             return collect_and_fit(runtime, manifest, design, fitting, config["scale"], args.band - 1,
                                    filter_steps=label_filter)
