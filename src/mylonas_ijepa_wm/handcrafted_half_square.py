@@ -35,8 +35,15 @@ def make_design(source, manifest):
     grid_ids = [intern(source["points"][i]) for i in grid["point_ids"]]
     mid_x, mid_y = [(np.asarray(axis[:-1]) + axis[1:]) / 2 for axis in (grid["xs"], grid["ys"])]
     evaluation_ids = [intern((x, y)) for y in mid_y for x in mid_x]
-    if any(not wall.valid(p) or p[0] <= wall.WALL_RIGHT for p in points):
+    if any(not wall.valid(points[i]) or points[i][0] <= wall.WALL_RIGHT for i in refs + evaluation_ids):
         raise ValueError("goals and evaluation grid must be in the legal right room")
+    # The frozen heatmap grid stores its coordinates as float32. Accept the
+    # rounded border values without moving the positions we render.
+    lower, upper = map(float, np.float32(wall.BOUNDS))
+    for i in grid_ids:
+        x, y = points[i]
+        if not (wall.WALL_RIGHT < x <= upper and lower <= y <= upper):
+            raise ValueError(f"saved heatmap point {(x, y)} must be in the legal right room")
 
     samples = []
     for goal in refs[:len(train_ids)]:
