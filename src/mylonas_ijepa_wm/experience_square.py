@@ -51,7 +51,7 @@ def _rectangles(goal, inner, outer, *, regions=None):
     return np.asarray(rectangles).reshape(-1, 2, 2)
 
 
-def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None):
+def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None, extra_goal_count=0):
     if starts_per_goal < 1:
         raise ValueError("starts per goal must be positive")
     rng = np.random.default_rng(SEED)
@@ -62,18 +62,21 @@ def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None):
         goals = original_goals
     if round_seed:
         rng = np.random.default_rng([SEED, round_seed])
+    # Appended goals should not change the saved protocol's starts or CEM seeds.
+    extra_rng = np.random.default_rng([SEED, round_seed, 1]) if extra_goal_count else rng
     stages = []
     for index, (inner, outer) in enumerate(BANDS):
         cases = []
         for g, goal in enumerate(goals):
+            sampler = rng if g < len(goals) - extra_goal_count else extra_rng
             rectangles = _rectangles(goal, inner, outer)
             if not len(rectangles):
                 continue
             areas = np.prod(rectangles[:, 1] - rectangles[:, 0], axis=1)
             for j in range(starts_per_goal):
                 for _ in range(10000):
-                    lo, hi = rectangles[rng.choice(len(areas), p=areas / areas.sum())]
-                    start = rng.uniform(lo, hi)
+                    lo, hi = rectangles[sampler.choice(len(areas), p=areas / areas.sum())]
+                    start = sampler.uniform(lo, hi)
                     if wall.valid(start) and np.linalg.norm(start - goal) >= 4.5:
                         break
                 else:
@@ -82,13 +85,13 @@ def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None):
                 route = "same_room" if a == b else "doorway_start" if a == "door" else f"{a}_to_{b}"
                 cases.append(dict(case_id=f"b{index + 1}_g{g:02d}_s{j:02d}", split="train", band=index + 1,
                                   goal_index=g, start=start.tolist(), goal=goal, layout=list(wall.LAYOUT),
-                                  route=route, seed=int(rng.integers(0, 2**31 - 1)), run_seed=SEED))
+                                  route=route, seed=int(sampler.integers(0, 2**31 - 1)), run_seed=SEED))
         stages.append(cases)
     return dict(bands=[list(b) for b in BANDS], goals=goals, goal_ids=list(range(len(goals))), stages=stages,
                 starts_per_goal=starts_per_goal, planning=dict(PLANNING), seed=SEED, pair_cap=experience.PAIR_CAP)
 
 
-def expanded_goals(right_manifest):
+def expanded_goals(right_manifest, *, extra_left=()):
     right = {}
     for case in right_manifest["stages"][0]:
         i, point = case["goal_index"], case["goal"]
@@ -98,13 +101,19 @@ def expanded_goals(right_manifest):
     if (set(right) != set(range(6)) or len({tuple(p) for p in right.values()}) != 6
             or any(not wall.valid(p) or p[0] <= wall.WALL_RIGHT for p in right.values())):
         raise ValueError("expected six distinct saved right-room goals")
-    return [*make_manifest()["goals"][:3], *(right[i] for i in range(6))]
+    left = make_manifest()["goals"][:3]
+    extra = [list(point) for point in extra_left]
+    if (any(not (SAFE_LOW <= x < wall.WALL_LEFT and SAFE_LOW <= y <= SAFE_HIGH) for x, y in extra)
+            or len({tuple(p) for p in left + extra}) != len(left) + len(extra)):
+        raise ValueError("extra goals must be distinct reset-safe positions in the left room")
+    return [*left, *(right[i] for i in range(6)), *extra]
 
 
-def make_repeated_manifest(starts_per_goal, *, rounds, goals=None):
-    first = make_manifest(starts_per_goal, goals=goals)
+def make_repeated_manifest(starts_per_goal, *, rounds, goals=None, extra_goal_count=0):
+    first = make_manifest(starts_per_goal, goals=goals, extra_goal_count=extra_goal_count)
     first["planning"].update(planning_horizon=1, actions_per_plan=1)
-    later = (make_manifest(starts_per_goal, round_seed=number, goals=goals) for number in range(1, rounds))
+    later = (make_manifest(starts_per_goal, round_seed=number, goals=goals, extra_goal_count=extra_goal_count)
+             for number in range(1, rounds))
     return experience.repeat_manifest(first, later)
 
 
@@ -304,6 +313,8 @@ def main(argv=None):
     parser.add_argument("--band", type=int, choices=range(1, len(BANDS) + 1))
     parser.add_argument("--starts-per-goal", type=int, default=6)
     parser.add_argument("--right-goals-run", type=Path)
+    parser.add_argument("--extra-left-goal", nargs=2, type=float, action="append", default=[], metavar=("X", "Y"),
+                        help="Append a left-room goal to the expanded manifest. Repeat for each new goal.")
     parser.add_argument("--benchmark-run", type=Path)
     parser.add_argument("--rounds-per-band", type=int, default=1,
                         help="Use two or more rounds for one-macro MPC with success-only temporal labels.")
@@ -316,15 +327,21 @@ def main(argv=None):
         parser.error("--rounds-per-band must be positive")
     if args.right_goals_run is not None and rounds < 2:
         parser.error("expanded goals require at least two rounds per band")
+    if args.extra_left_goal and args.right_goals_run is None:
+        parser.error("--extra-left-goal requires --right-goals-run")
     if args.operation == "benchmark" and (args.right_goals_run is None or args.benchmark_run is None):
         parser.error("benchmark requires --right-goals-run and --benchmark-run")
     sources = [args.world_model_checkpoint, args.dino_wm_root]
     sources.extend(p for p in (args.right_goals_run, args.benchmark_run) if p is not None)
     args.output_dir, _ = locations(args.output_dir, args.encoder_checkpoint, sources)
     collection_maps = args.right_goals_run is not None
-    goals = expanded_goals(read(args.right_goals_run / "experiment.json")["manifest"]) if collection_maps else None
+    goals = None
+    if collection_maps:
+        goals = expanded_goals(read(args.right_goals_run / "experiment.json")["manifest"],
+                               extra_left=args.extra_left_goal)
     if rounds > 1:
-        manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds, goals=goals)
+        manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds, goals=goals,
+                                          extra_goal_count=len(args.extra_left_goal))
         kind = "experience_mpc_more_goals_full_square_v1" if collection_maps else "experience_mpc_repeated_full_square_v1"
     else:
         manifest = make_manifest(args.starts_per_goal)

@@ -119,3 +119,17 @@ def test_fixed_benchmark_uses_archived_starts_seeds_and_goal_tokens(tmp_path, mo
     assert all(r["success"] and not r["previous_success"] for r in rows)
     assert square.benchmark_band4(Runtime(), manifest, old) == rows
     assert len(seen) == len(cases)
+
+
+def test_extra_left_goals_append_to_the_nine_goal_run():
+    right = [[50, 42], [44.2, 40.45], [53, 47.2], [44.3, 20.75], [50, 12], [50, 16]]
+    archive = dict(stages=[[dict(goal_index=i, goal=g) for i, g in enumerate(right)]])
+    extra = [[14, 12], [23, 30], [16, 51]]
+    nine = square.expanded_goals(archive)
+    goals = square.expanded_goals(archive, extra_left=extra)
+    assert goals == nine + extra
+    original = square.make_repeated_manifest(6, rounds=3, goals=nine)
+    manifest = square.make_repeated_manifest(6, rounds=3, goals=goals, extra_goal_count=3)
+    assert [[c for c in batch if c["goal_index"] < 9] for batch in manifest["stages"]] == original["stages"]
+    assert sum(map(len, manifest["stages"][:12])) == 864
+    assert all(sum(c["goal_index"] == 10 for c in batch) == 6 for batch in manifest["stages"][:12])
