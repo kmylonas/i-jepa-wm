@@ -211,7 +211,7 @@ class PilotRuntime:
         return torch.cat(encoded)
 
     def run_case(self, case, *, metric=None, capture=False, cost="latent", latent_cost_fn=None,
-                 journal_stage=None, initial_action=None, capture_failures=True):
+                 journal_stage=None, initial_action=None, capture_failures=True, record_positions=False):
         if latent_cost_fn is not None and (metric is not None or cost != "latent"):
             raise ValueError("explicit latent scorer requires latent cost without an adapter")
         self.load_world_model()
@@ -224,9 +224,10 @@ class PilotRuntime:
         def observe(step, outcome, action):
             if step:
                 journal.record(step, action)
+            if capture or record_positions:
+                states.append(outcome.state.copy())
             if capture:
                 steps.append(step)
-                states.append(outcome.state.copy())
                 frames.append(outcome.frame.copy())
 
         planning_args = SimpleNamespace(**self.manifest["planning"], cost=cost)
@@ -245,7 +246,7 @@ class PilotRuntime:
             )
         record["attempt_id"] = journal.identity["attempt_id"]
         record["raw_path"] = None
-        if capture and not capture_failures:
+        if record_positions or capture and not capture_failures:
             record["primitive_positions"] = [state[:2].tolist() for state in states]
         if capture and (capture_failures or record["success"]):
             path = Path("raw") / f"run_{case['run_seed']}" / f"{case['case_id']}.pt"

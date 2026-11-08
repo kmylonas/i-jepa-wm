@@ -3,15 +3,17 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from src.mylonas_ijepa_wm import experience_curriculum as experience
 from src.mylonas_ijepa_wm import experience_exploration
 from src.mylonas_ijepa_wm import geodesic_radial as wall
 from src.mylonas_ijepa_wm import geodesic_multigoal as metrics
 from src.mylonas_ijepa_wm import geodesic_square as square
+from src.mylonas_ijepa_wm.cost_adapter import adapter_goal_cost
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
-from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, write_json
-from src.mylonas_ijepa_wm.curriculum_runtime import EXPECTED_ENCODER, EXPECTED_WM, PilotRuntime
+from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, run_stage, write_json
+from src.mylonas_ijepa_wm.curriculum_runtime import EXPECTED_ENCODER, EXPECTED_WM, PilotRuntime, file_sha256
 from src.mylonas_ijepa_wm.radial_experiment import locations
 from src.mylonas_ijepa_wm.radial_multigoal_experiment import _scores
 from src.mylonas_ijepa_wm.ranking_planning import _frame_hash, runtime_variant
@@ -49,13 +51,15 @@ def _rectangles(goal, inner, outer, *, regions=None):
     return np.asarray(rectangles).reshape(-1, 2, 2)
 
 
-def make_manifest(starts_per_goal=6, *, round_seed=0):
+def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None):
     if starts_per_goal < 1:
         raise ValueError("starts per goal must be positive")
     rng = np.random.default_rng(SEED)
     # Three randomly drawn targets in each room, one in each vertical third.
-    goals = [rng.uniform([left, y], [right, y + 16]).tolist()
-             for left, right in ((8, 24), (40, 56)) for y in (8, 24, 40)]
+    original_goals = [rng.uniform([left, y], [right, y + 16]).tolist()
+                      for left, right in ((8, 24), (40, 56)) for y in (8, 24, 40)]
+    if goals is None:
+        goals = original_goals
     if round_seed:
         rng = np.random.default_rng([SEED, round_seed])
     stages = []
@@ -84,10 +88,23 @@ def make_manifest(starts_per_goal=6, *, round_seed=0):
                 starts_per_goal=starts_per_goal, planning=dict(PLANNING), seed=SEED, pair_cap=experience.PAIR_CAP)
 
 
-def make_repeated_manifest(starts_per_goal, *, rounds):
-    first = make_manifest(starts_per_goal)
+def expanded_goals(right_manifest):
+    right = {}
+    for case in right_manifest["stages"][0]:
+        i, point = case["goal_index"], case["goal"]
+        if i in right and right[i] != point:
+            raise ValueError("saved right-room goal differs across cases")
+        right[i] = point
+    if (set(right) != set(range(6)) or len({tuple(p) for p in right.values()}) != 6
+            or any(not wall.valid(p) or p[0] <= wall.WALL_RIGHT for p in right.values())):
+        raise ValueError("expected six distinct saved right-room goals")
+    return [*make_manifest()["goals"][:3], *(right[i] for i in range(6))]
+
+
+def make_repeated_manifest(starts_per_goal, *, rounds, goals=None):
+    first = make_manifest(starts_per_goal, goals=goals)
     first["planning"].update(planning_horizon=1, actions_per_plan=1)
-    later = (make_manifest(starts_per_goal, round_seed=number) for number in range(1, rounds))
+    later = (make_manifest(starts_per_goal, round_seed=number, goals=goals) for number in range(1, rounds))
     return experience.repeat_manifest(first, later)
 
 
@@ -184,11 +201,26 @@ def make_design(runtime, manifest):
     return design
 
 
-def compare(runtime, manifest, design, *, band_count=None):
+def compare(runtime, manifest, design, *, band_count=None, collection_maps=False):
     points = np.asarray(design["points"])
     goals = design["goal_ids"]
     tokens = experience._encode_positions(runtime, design, list(range(len(points))))
-    raw = _scores(None, tokens, goals, runtime.device)
+    collection_ids = manifest["goal_ids"] if collection_maps else []
+    if collection_maps:
+        target_path = runtime.root / "collection_goals.pt"
+        rounds = manifest["rounds_per_band"]
+        first = read(runtime.root / experience._stage_name(0, rounds) / "complete.json")
+        target = torch.load(target_path, map_location="cpu", weights_only=True)
+        if (target["runtime_id"] != runtime.runtime_id or file_sha256(target_path) != first["goal_sha256"]
+                or target["tokens"].shape != tokens[collection_ids].shape):
+            raise ValueError("collection goal tensors differ from the saved planner targets")
+        tokens[collection_ids] = target["tokens"]
+    score_goals = goals + collection_ids
+    raw = _scores(None, tokens, score_goals, runtime.device)
+
+    def grid_values(scores):
+        return [[None if i is None else float(row[i]) for i in design["grid"]] for row in scores]
+
     truth = np.asarray([[wall.distance(p, points[g]) for p in points] for g in goals])
     extent = np.abs(points[None] - points[goals, None]).max(axis=2)
     mask = np.asarray(design["heldout_mask"])
@@ -206,29 +238,73 @@ def compare(runtime, manifest, design, *, band_count=None):
         band, number = divmod(i, rounds)
         _, outer = bands[band]
         adapter, report = experience._checkpoint(runtime, i, rounds)
-        adapted = _scores(adapter, tokens, goals, runtime.device)
+        adapted = _scores(adapter, tokens, score_goals, runtime.device)
         by_goal = [metrics._goal_report(design, g, truth[j], extent[j], raw[j], adapted[j], mask, edges, j, outer)
                    for j, g in enumerate(goals)]
         stage = dict(band=band + 1, half_width=outer, collection=report["collection"],
                      updates=report["updates"], by_goal=by_goal)
         if rounds > 1:
             stage["round"] = number + 1
+        if collection_maps:
+            stage["collection_grid"] = grid_values(adapted[len(goals):])
         stages.append(stage)
     result = dict(axis=design["axis"], goals=points[goals].tolist(), stages=stages,
                   heldout_grid_points=int(sum(mask[i] for i in design["grid"] if i is not None)),
-                  raw_grid=[[None if i is None else float(row[i]) for i in design["grid"]] for row in raw],
-                  truth_grid=[[None if i is None else float(row[i]) for i in design["grid"]] for row in truth])
+                  raw_grid=grid_values(raw[:len(goals)]), truth_grid=grid_values(truth))
+    if collection_maps:
+        result["collection_raw_grid"] = grid_values(raw[len(goals):])
     write_json(runtime.root / "comparison.json", result)
     return result
 
 
+def benchmark_band4(runtime, manifest, reference_run):
+    """Replay the earlier Band 4 Round 1 cases with the incoming Band 4 cost."""
+    previous = read(reference_run / "experiment.json")["manifest"]
+    if previous["planning"] != manifest["planning"]:
+        raise ValueError("fixed benchmark requires matching planner settings")
+    old_stage = read(reference_run / "band_4_round_1" / "complete.json")
+    old = old_stage["collection"]
+    cases = [dict(row["case"], split="eval") for row in old]
+    stage_index = 3 * manifest["rounds_per_band"] - 1
+    adapter, checkpoint = experience._checkpoint(runtime, stage_index, manifest["rounds_per_band"])
+    target_path = reference_run / "collection_goals.pt"
+    saved = torch.load(target_path, map_location="cpu", weights_only=True)
+    if (saved["runtime_id"] != old_stage["runtime_id"] or file_sha256(target_path) != old_stage["goal_sha256"]
+            or len(saved["tokens"]) != len(previous["goals"])
+            or any(case["goal"] != previous["goals"][case["goal_index"]] for case in cases)):
+        raise ValueError("fixed benchmark goal tokens or cases differ from the archived run")
+    scorers = [adapter_goal_cost(adapter, t) if adapter is not None else experience._raw_cost(t)
+               for t in saved["tokens"].to(runtime.device)]
+    stage = "benchmark_band_4"
+    condition = dict(collector=checkpoint["checkpoint_sha256"], reference=digest(old),
+                     goal_sha256=old_stage["goal_sha256"])
+
+    def execute(case):
+        result = runtime.run_case(case, latent_cost_fn=scorers[case["goal_index"]],
+                                  journal_stage=stage, record_positions=True)
+        result["reached_other_room"] = case["route"] in crossings(result["primitive_positions"])
+        return result
+
+    records = run_stage(runtime.root, stage, cases, runtime.runtime_id, execute, condition=condition)
+    rows = [
+        dict(case=case, previous_success=before["success"], success=after["success"],
+             previous_crossed=before["reached_other_room"], crossed=after["reached_other_room"],
+             positions=after["primitive_positions"])
+        for case, before, after in zip(cases, old, records, strict=True)
+    ]
+    write_json(runtime.root / "band_4_fixed_benchmark.json", dict(reference=str(reference_run), rows=rows))
+    return rows
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("stage", "compare"))
+    parser.add_argument("operation", choices=("stage", "compare", "benchmark"))
     for field in ("output-dir", "world-model-checkpoint", "encoder-checkpoint", "dino-wm-root"):
         parser.add_argument(f"--{field}", type=Path, required=True)
     parser.add_argument("--band", type=int, choices=range(1, len(BANDS) + 1))
     parser.add_argument("--starts-per-goal", type=int, default=6)
+    parser.add_argument("--right-goals-run", type=Path)
+    parser.add_argument("--benchmark-run", type=Path)
     parser.add_argument("--rounds-per-band", type=int, default=1,
                         help="Use two or more rounds for one-macro MPC with success-only temporal labels.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
@@ -238,11 +314,18 @@ def main(argv=None):
     rounds = args.rounds_per_band
     if rounds < 1:
         parser.error("--rounds-per-band must be positive")
-    args.output_dir, _ = locations(args.output_dir, args.encoder_checkpoint,
-                                   (args.world_model_checkpoint, args.dino_wm_root))
+    if args.right_goals_run is not None and rounds < 2:
+        parser.error("expanded goals require at least two rounds per band")
+    if args.operation == "benchmark" and (args.right_goals_run is None or args.benchmark_run is None):
+        parser.error("benchmark requires --right-goals-run and --benchmark-run")
+    sources = [args.world_model_checkpoint, args.dino_wm_root]
+    sources.extend(p for p in (args.right_goals_run, args.benchmark_run) if p is not None)
+    args.output_dir, _ = locations(args.output_dir, args.encoder_checkpoint, sources)
+    collection_maps = args.right_goals_run is not None
+    goals = expanded_goals(read(args.right_goals_run / "experiment.json")["manifest"]) if collection_maps else None
     if rounds > 1:
-        manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds)
-        kind = "experience_mpc_repeated_full_square_v1"
+        manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds, goals=goals)
+        kind = "experience_mpc_more_goals_full_square_v1" if collection_maps else "experience_mpc_repeated_full_square_v1"
     else:
         manifest = make_manifest(args.starts_per_goal)
         kind = "experience_square_v1"
@@ -270,7 +353,9 @@ def main(argv=None):
                     summarize_round_episode=summarize_round_episode if rounds > 1 else None,
                 )
             return result
-        return compare(runtime, manifest, design, band_count=args.band)
+        if args.operation == "benchmark":
+            return benchmark_band4(runtime, manifest, args.benchmark_run)
+        return compare(runtime, manifest, design, band_count=args.band, collection_maps=collection_maps)
     finally:
         runtime.close()
 
