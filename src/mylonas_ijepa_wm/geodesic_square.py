@@ -9,7 +9,7 @@ HALF_WIDTHS = (6, 12, 18, 24, 30, 36, 42, 46)
 BANDS = tuple(zip((0, *HALF_WIDTHS[:-1]), HALF_WIDTHS))
 
 
-def training_nodes(goal, *, bands=BANDS):
+def lattice_nodes(goal, *, bands=BANDS):
     for band, (inner, outer) in enumerate(bands):
         offsets = range(-outer, outer + 1, SPACING)
         for y in offsets:
@@ -17,7 +17,12 @@ def training_nodes(goal, *, bands=BANDS):
                 extent = max(abs(x), abs(y))
                 point = [goal[0] + x, goal[1] + y]
                 if extent > inner and radial.valid(point):
-                    yield dict(point=point, band=band, radius=extent, distance=radial.distance(point, goal))
+                    yield dict(point=point, band=band, radius=extent)
+
+
+def training_nodes(goal, *, bands=BANDS):
+    for node in lattice_nodes(goal, bands=bands):
+        yield dict(node, distance=radial.distance(node["point"], goal))
 
 
 def contours(points, ids, goal):

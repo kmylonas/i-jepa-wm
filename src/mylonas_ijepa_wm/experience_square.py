@@ -1,6 +1,7 @@
 """Collect real planner experience across expanding square bands on the Wall map."""
 import argparse
 from functools import partial
+from math import dist
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,28 @@ def make_repeated_manifest(starts_per_goal, *, rounds, goals=None, extra_goal_co
     return experience.repeat_manifest(first, later)
 
 
+def make_grid_manifest(goals, *, rounds):
+    """Use each legal goal-centered lattice point once across the rounds of its band."""
+    batches = [[[] for _ in BANDS] for _ in range(rounds)]
+    seeds = np.random.default_rng(SEED)
+    for g, goal in enumerate(goals):
+        for j, node in enumerate(square.lattice_nodes(goal, bands=BANDS)):
+            point, band = node["point"], node["band"]
+            if any(not SAFE_LOW <= value <= SAFE_HIGH for value in point) or dist(point, goal) < 4.5:
+                continue
+            x, y = [round((value - center) / square.SPACING) for value, center in zip(point, goal)]
+            a, b = _room(point[0]), _room(goal[0])
+            route = "same_room" if a == b else "doorway_start" if a == "door" else f"{a}_to_{b}"
+            batches[(x + y) % rounds][band].append(
+                dict(case_id=f"b{band + 1}_g{g:02d}_s{j:03d}", split="train", band=band + 1,
+                     goal_index=g, start=point, goal=goal, layout=list(wall.LAYOUT), route=route,
+                     seed=int(seeds.integers(0, 2**31 - 1)), run_seed=SEED))
+    first = dict(bands=[list(band) for band in BANDS], goals=goals, goal_ids=list(range(len(goals))),
+                 grid_start_spacing=square.SPACING, stages=batches[0], seed=SEED, pair_cap=experience.PAIR_CAP,
+                 planning=dict(PLANNING, planning_horizon=1, actions_per_plan=1))
+    return experience.repeat_manifest(first, (dict(stages=stages) for stages in batches[1:]))
+
+
 def _doorway_step(a, b):
     return bool(min(a[0], b[0]) <= wall.WALL_RIGHT and max(a[0], b[0]) >= wall.WALL_LEFT
                 and wall.valid(a) and wall.valid(b) and wall._visible(a, b))
@@ -217,7 +240,9 @@ def make_design(runtime, manifest):
     train = manifest["goals"]
     goals = [*train, *[list(g) for g in metrics.TEST_GOALS]]
     ids = list(range(len(train), len(goals)))
-    axis = [wall.BOUNDS[0], *range(6, 60, 2), wall.BOUNDS[1]]
+    # Offset evaluation nodes from the even lattice used by several training goals.
+    first_grid_point = 5 if "grid_start_spacing" in manifest else 6
+    axis = [wall.BOUNDS[0], *range(first_grid_point, 60, 2), wall.BOUNDS[1]]
     points = list(goals)
     grid = []
     for y in axis:
@@ -376,9 +401,13 @@ def main(argv=None):
                       help="Use the right room and rank failed observations against successful routes.")
     mode.add_argument("--full-route-feedback", action="store_true",
                       help="Use both rooms and rank failed observations against successful routes.")
+    parser.add_argument("--grid-starts", action="store_true",
+                        help="Use the hand-crafted lattice as starts for full-map route feedback.")
     args = parser.parse_args(argv)
     route_feedback = args.half_route_feedback or args.full_route_feedback
     fresh = args.fresh_loop_curriculum or route_feedback
+    if args.grid_starts and not args.full_route_feedback:
+        parser.error("--grid-starts requires --full-route-feedback")
     if args.operation == "stage" and args.band is None:
         parser.error("stage requires --band")
     rounds = args.rounds_per_band
@@ -418,7 +447,9 @@ def main(argv=None):
         goals = list(map(list, FRESH_RIGHT_GOALS))
         reset_region = experience_half_square.RESET_REGION
         collection_maps = True
-    if rounds > 1:
+    if args.grid_starts:
+        manifest = make_grid_manifest(goals, rounds=rounds)
+    elif rounds > 1:
         manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds, goals=goals,
                                           extra_goal_count=extra_goal_count, reset_region=reset_region)
         kind = "experience_mpc_more_goals_full_square_v1" if collection_maps else "experience_mpc_repeated_full_square_v1"
@@ -440,7 +471,8 @@ def main(argv=None):
         from src.mylonas_ijepa_wm import experience_route_feedback
 
         scope = "half" if args.half_route_feedback else "full"
-        kind = f"experience_mpc_route_feedback_{scope}_square_v1"
+        kind = (f"experience_mpc_route_feedback_{scope}_grid_starts_v1" if args.grid_starts
+                else f"experience_mpc_route_feedback_{scope}_square_v1")
         manifest["loop_radius"] = .5
         domain = _legal_positions
         if args.half_route_feedback:

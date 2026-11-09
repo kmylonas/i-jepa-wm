@@ -268,3 +268,24 @@ def test_full_route_feedback_keeps_both_rooms_and_uses_only_route_labels(tmp_pat
     assert "failure_pair_cap" not in manifest and "failure_draw_cap" not in manifest
     assert manifest["loop_radius"] == .5
     assert {case["route"] for batch in manifest["stages"] for case in batch} >= {"left_to_right", "right_to_left"}
+
+
+def test_grid_manifest_covers_each_eligible_handcrafted_node_once():
+    from src.mylonas_ijepa_wm import geodesic_square
+
+    goals = [[14., 12.], [50., 42.]]
+    manifest = square.make_grid_manifest(goals, rounds=3)
+    assert manifest == square.make_grid_manifest(goals, rounds=3)
+    cases = [case for stage in manifest["stages"] for case in stage]
+    actual = {(c["band"], c["goal_index"], tuple(c["start"])) for c in cases}
+    expected = {
+        (node["band"] + 1, goal_index, tuple(node["point"]))
+        for goal_index, goal in enumerate(goals)
+        for node in geodesic_square.training_nodes(goal, bands=square.BANDS)
+        if all(square.SAFE_LOW <= coordinate <= square.SAFE_HIGH for coordinate in node["point"])
+        and np.linalg.norm(np.subtract(node["point"], goal)) >= 4.5
+    }
+    assert len(cases) == len(actual) and actual == expected
+    assert all({case["round"] for case in stage} == {i % 3 + 1}
+               for i, stage in enumerate(manifest["stages"]) if stage)
+    assert {"left_to_right", "right_to_left"} <= {case["route"] for case in cases}
