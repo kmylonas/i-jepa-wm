@@ -1,5 +1,6 @@
 """Collect real planner experience across expanding square bands on the Wall map."""
 import argparse
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -164,9 +165,31 @@ def temporal_filter(raw, case, design, cap):
     return experience._temporal_filter(raw, case, design, cap, domain=_legal_positions)
 
 
+def sample_failed_frames(states, frames, case, design, cap):
+    """Keep the start and up to cap distinct later images spread over the failed path."""
+    xy = np.asarray(states)[:, :2]
+    inside = _legal_positions(xy)
+    protected = experience._exclude_protected(xy, inside, dict(case, goal_id=case["goal_index"]), design)
+    start_hash = _frame_hash(frames[0])
+    if not inside[0] or start_hash in protected:
+        return []
+    protected.add(start_hash)
+    candidates = {}
+    for i in np.flatnonzero(inside[1:]) + 1:
+        h = _frame_hash(frames[i])
+        if h not in protected:
+            candidates[h] = int(i)
+    eligible = sorted(candidates.values())
+    if not eligible:
+        return []
+    count = min(cap, len(eligible))
+    selected = np.linspace(0, len(eligible) - 1, count, dtype=int) if count > 1 else [-1]
+    return [0, *(eligible[i] for i in selected)]
+
+
 def summarize_round_episode(record, saved, inner, macro_steps):
     events = crossings(record["primitive_positions"])
-    retained = saved.get("pairs", ())
+    retained = saved.get("pairs", ()) if record.get("success") else ()
     xy = np.asarray(saved.get("positions", []))
     return dict(
         crossings=events,
@@ -316,6 +339,8 @@ def main(argv=None):
     parser.add_argument("--extra-left-goal", nargs=2, type=float, action="append", default=[], metavar=("X", "Y"),
                         help="Append a left-room goal to the expanded manifest. Repeat for each new goal.")
     parser.add_argument("--benchmark-run", type=Path)
+    parser.add_argument("--failure-pairs", type=int, default=0,
+                        help="Maximum later failure frames to rank above the start cost.")
     parser.add_argument("--rounds-per-band", type=int, default=1,
                         help="Use two or more rounds for one-macro MPC with success-only temporal labels.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
@@ -329,6 +354,8 @@ def main(argv=None):
         parser.error("expanded goals require at least two rounds per band")
     if args.extra_left_goal and args.right_goals_run is None:
         parser.error("--extra-left-goal requires --right-goals-run")
+    if args.failure_pairs < 0 or (args.failure_pairs and rounds < 2):
+        parser.error("--failure-pairs must be nonnegative and requires repeated rounds")
     if args.operation == "benchmark" and (args.right_goals_run is None or args.benchmark_run is None):
         parser.error("benchmark requires --right-goals-run and --benchmark-run")
     sources = [args.world_model_checkpoint, args.dino_wm_root]
@@ -346,6 +373,11 @@ def main(argv=None):
     else:
         manifest = make_manifest(args.starts_per_goal)
         kind = "experience_square_v1"
+    failure_selector = None
+    if args.failure_pairs:
+        manifest["failure_pair_cap"] = args.failure_pairs
+        failure_selector = partial(sample_failed_frames, cap=args.failure_pairs)
+        kind = "experience_mpc_failure_feedback_full_square_v1"
     config = dict(kind=kind, manifest=manifest, fitting=FITTING)
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
@@ -368,6 +400,7 @@ def main(argv=None):
                     runtime, manifest, design, FITTING, None, index,
                     filter_steps=temporal_filter if rounds > 1 else filter_steps,
                     summarize_round_episode=summarize_round_episode if rounds > 1 else None,
+                    sample_failure=failure_selector,
                 )
             return result
         if args.operation == "benchmark":

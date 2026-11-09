@@ -211,7 +211,8 @@ class PilotRuntime:
         return torch.cat(encoded)
 
     def run_case(self, case, *, metric=None, capture=False, cost="latent", latent_cost_fn=None,
-                 journal_stage=None, initial_action=None, capture_failures=True, record_positions=False):
+                 journal_stage=None, initial_action=None, capture_failures=True, record_positions=False,
+                 failure_frame_selector=None):
         if latent_cost_fn is not None and (metric is not None or cost != "latent"):
             raise ValueError("explicit latent scorer requires latent cost without an adapter")
         self.load_world_model()
@@ -246,14 +247,22 @@ class PilotRuntime:
             )
         record["attempt_id"] = journal.identity["attempt_id"]
         record["raw_path"] = None
-        if record_positions or capture and not capture_failures:
+        sampled_failure = capture and not record["success"] and failure_frame_selector is not None
+        if record_positions or sampled_failure or (capture and not capture_failures):
             record["primitive_positions"] = [state[:2].tolist() for state in states]
-        if capture and (capture_failures or record["success"]):
+        frame_ids = range(len(frames))
+        if sampled_failure:
+            frame_ids = failure_frame_selector(states, frames)
+        elif not capture_failures and not record["success"]:
+            frame_ids = []
+        if frame_ids:
             path = Path("raw") / f"run_{case['run_seed']}" / f"{case['case_id']}.pt"
             save_tensors(self.root / path, dict(
                 runtime_id=self.runtime_id, case=case, success=record["success"],
-                frames=torch.from_numpy(np.stack(frames)), states=torch.tensor(np.array(states)),
-                primitive_steps=torch.tensor(steps, dtype=torch.int64),
+                frames=torch.from_numpy(np.stack([frames[i] for i in frame_ids])),
+                states=torch.as_tensor(np.stack([states[i] for i in frame_ids])),
+                primitive_steps=torch.tensor([steps[i] for i in frame_ids], dtype=torch.int64),
+                **({"sampled_failure": True} if sampled_failure else {}),
                 primitive_actions=torch.tensor(record["primitive_actions"], dtype=torch.float32).reshape(-1, 2),
                 macro_durations=record["macro_durations"],
                 **({"prefix_steps": record["prefix_steps"]} if "prefix_steps" in record else {}),

@@ -86,11 +86,16 @@ def _observations(raw):
     return xy
 
 
-def _select_steps(xy, frames, candidates, inside, case, design, cap):
+def _exclude_protected(xy, inside, case, design):
     points, hashes = _protected(design)
     if len(points):
         inside &= (np.linalg.norm(xy[:, None, :] - points[None, :, :], axis=-1) > 1e-5).all(axis=1)
     hashes.add(design["frame_sha256"][case["goal_id"]])
+    return hashes
+
+
+def _select_steps(xy, frames, candidates, inside, case, design, cap):
+    hashes = _exclude_protected(xy, inside, case, design)
     eligible = []
     for i in candidates:
         if inside[i] and inside[i + 1]:
@@ -170,15 +175,29 @@ def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root
         raise ValueError(f"raw observations changed for {case['case_id']}")
     raw = torch.load(raw_path, map_location="cpu", weights_only=True)
     if (raw["case"] != case or raw["runtime_id"] != source_runtime_id
-            or (raw_root is not None and raw["success"] != record["success"])
-            or len(raw["frames"]) != record["micro_steps"] + 1):
+            or (raw_root is not None and raw["success"] != record["success"])):
         raise ValueError("raw observations do not match the completed rollout")
-    starts, stats = filter_steps(raw, dict(case, goal_id=manifest["goal_ids"][case["goal_index"]]),
-                           design, manifest["pair_cap"])
-    ids = sorted({j for i in starts for j in (i, i + 1)})
+    if raw.get("sampled_failure"):
+        steps = raw["primitive_steps"].tolist()
+        cap = manifest.get("failure_pair_cap", 0)
+        if (record["success"] or raw["success"] or not 2 <= len(steps) <= cap + 1
+                or len(steps) != len(raw["states"]) or len(steps) != len(raw["frames"])
+                or steps[0] != 0 or steps[-1] > record["micro_steps"]
+                or any(a >= b for a, b in zip(steps, steps[1:]))):
+            raise ValueError("sampled failure does not match the completed rollout")
+        pairs = [(i, 0) for i in range(1, len(steps))]
+        stats = dict(_failed_temporal_stats(np.asarray(record["primitive_positions"])),
+                     skipped_failed=False, eligible_pairs=len(pairs), retained_pairs=len(pairs))
+    else:
+        if len(raw["frames"]) != record["micro_steps"] + 1:
+            raise ValueError("raw observations do not match the completed rollout")
+        starts, stats = filter_steps(raw, dict(case, goal_id=manifest["goal_ids"][case["goal_index"]]),
+                                    design, manifest["pair_cap"])
+        pairs = [(i, i + 1) for i in starts]
+    ids = sorted({j for pair in pairs for j in pair})
     local = {i: j for j, i in enumerate(ids)}
     payload = dict(inputs=lineage, stats=stats, positions=raw["states"][ids, :2],
-                   pairs=[[local[i], local[i + 1]] for i in starts],
+                   pairs=[[local[a], local[b]] for a, b in pairs],
                    tokens=runtime.encode_frames(raw["frames"][ids]).half() if ids else None)
     save_tensors(path, payload)
     return payload
@@ -236,7 +255,7 @@ def _initial_scale(tokens, population):
     return float(positive.median())
 
 
-def _collect_band(runtime, manifest, design, index, initial, prior, encode_positions):
+def _collect_band(runtime, manifest, design, index, initial, prior, encode_positions, *, sample_failure=None):
     root = runtime.root
     rounds = manifest.get("rounds_per_band", 1)
     band = _stage_name(index, rounds)
@@ -258,6 +277,10 @@ def _collect_band(runtime, manifest, design, index, initial, prior, encode_posit
         options = dict(capture_failures=False) if exploration or rounds > 1 else {}
         if exploration:
             options["initial_action"] = case["random_first_action"]
+        if sample_failure is not None:
+            def select_frames(states, frames):
+                return sample_failure(states, frames, case, design)
+            options["failure_frame_selector"] = select_frames
         record = runtime.run_case(case, capture=True, latent_cost_fn=scorers[case["goal_index"]],
                                   journal_stage=band, **options)
         if record["raw_path"] is not None:
@@ -322,7 +345,7 @@ def _reuse_band1(runtime, manifest, archive):
 
 def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
                     filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None,
-                    summarize_round_episode=None):
+                    summarize_round_episode=None, sample_failure=None):
     root = runtime.root
     rounds = manifest.get("rounds_per_band", 1)
     band_number, round_number = divmod(index, rounds)
@@ -336,7 +359,9 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
         records, goals, condition = _reuse_band1(runtime, manifest, raw_band1)
         raw_root = raw_band1["root"]
     else:
-        records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior, encode_positions)
+        options = dict(sample_failure=sample_failure) if sample_failure is not None else {}
+        records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior,
+                                                   encode_positions, **options)
     rows = []
     for record in records:
         saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps, raw_root=raw_root)
