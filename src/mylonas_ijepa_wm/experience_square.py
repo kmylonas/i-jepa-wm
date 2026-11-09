@@ -144,7 +144,7 @@ def make_grid_manifest(goals, *, rounds):
                      seed=int(seeds.integers(0, 2**31 - 1)), run_seed=SEED))
     first = dict(bands=[list(band) for band in BANDS], goals=goals, goal_ids=list(range(len(goals))),
                  grid_start_spacing=square.SPACING, stages=batches[0], seed=SEED, pair_cap=experience.PAIR_CAP,
-                 planning=dict(PLANNING, planning_horizon=1, actions_per_plan=1))
+                 planning=dict(PLANNING, planning_horizon=1, actions_per_plan=1, max_macro_steps=7))
     return experience.repeat_manifest(first, (dict(stages=stages) for stages in batches[1:]))
 
 
