@@ -227,10 +227,44 @@ def test_failed_route_scores_take_one_match_per_success_and_rank_in_both_directi
 
 def test_route_feedback_samples_five_distinct_frames_across_failure():
     from src.mylonas_ijepa_wm import experience_route_feedback as routes
+    from src.mylonas_ijepa_wm.experience_half_square import _right_room
 
     xy = [[44, 12 + i] for i in range(11)]
     frames = np.asarray([[i] for i in (0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)])
     case = dict(goal_index=0)
     design = dict(points=[[50, 12]], goal_ids=[], heldout_mask=[False], frame_sha256=["goal"])
-    assert routes.sample_frames(xy, frames, case, design, [0]) == [0, 3, 5, 7, 10]
-    assert routes.sample_frames(xy[:2], frames[:2], case, design, [0]) == [0]
+    assert routes.sample_frames(xy, frames, case, design, [0], domain=_right_room) == [0, 3, 5, 7, 10]
+    assert routes.sample_frames(xy[:2], frames[:2], case, design, [0], domain=_right_room) == [0]
+
+
+def test_full_route_feedback_keeps_both_rooms_and_uses_only_route_labels(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from src.mylonas_ijepa_wm import experience_route_feedback as routes
+    from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
+
+    monkeypatch.setattr(square, "PilotRuntime", lambda args, manifest: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(square, "make_design", lambda *_: {})
+    outputs = []
+
+    def collect(runtime, manifest, design, fitting, scale, index, **options):
+        outputs.append(index)
+        assert options["rank_failures"].func is routes.label_failures
+        xy = [[15, 15], [32, 12], [32, 30], [50, 12]]
+        frames = np.asarray([[0], [1], [2], [3]])
+        design = dict(points=[[50, 42]], goal_ids=[], heldout_mask=[False], frame_sha256=["goal"])
+        assert options["sample_failure"](xy, frames, dict(goal_index=0), design) == [0, 2, 3]
+        return index
+
+    monkeypatch.setattr(square.experience, "collect_and_fit", collect)
+    root = tmp_path / "run"
+    square.main(["stage", "--full-route-feedback", "--band", "1", "--rounds-per-band", "3", "--device", "cpu",
+                 "--output-dir", str(root), "--world-model-checkpoint", str(tmp_path / "wm"),
+                 "--encoder-checkpoint", str(tmp_path / "encoder"), "--dino-wm-root", str(tmp_path / "dino")])
+    config = read(root / "experiment.json")
+    manifest = config["manifest"]
+    assert config["kind"] == "experience_mpc_route_feedback_full_square_v1"
+    assert outputs == [0, 1, 2]
+    assert len(manifest["goals"]) == 12 and len(manifest["stages"]) == 24
+    assert "failure_pair_cap" not in manifest and "failure_draw_cap" not in manifest
+    assert manifest["loop_radius"] == .5
+    assert {case["route"] for batch in manifest["stages"] for case in batch} >= {"left_to_right", "right_to_left"}

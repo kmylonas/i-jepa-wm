@@ -5,22 +5,21 @@ import numpy as np
 import torch
 
 from src.mylonas_ijepa_wm import experience_curriculum as experience
-from src.mylonas_ijepa_wm.experience_half_square import _right_room
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
 from src.mylonas_ijepa_wm.curriculum_runtime import save_tensors
 from src.mylonas_ijepa_wm.ranking_planning import _frame_hash
 
 
-def eligible_observations(states, frames, case, design, goal_ids):
+def eligible_observations(states, frames, case, design, goal_ids, *, domain):
     xy = np.asarray(states)[:, :2]
-    inside = _right_room(xy)
+    inside = domain(xy)
     hashes = experience._exclude_protected(xy, inside, dict(goal_id=goal_ids[case["goal_index"]]), design)
     return [int(i) for i in np.flatnonzero(inside) if _frame_hash(frames[i]) not in hashes]
 
 
-def sample_frames(states, frames, case, design, goal_ids):
+def sample_frames(states, frames, case, design, goal_ids, *, domain):
     unique = {}
-    for i in eligible_observations(states, frames, case, design, goal_ids):
+    for i in eligible_observations(states, frames, case, design, goal_ids, domain=domain):
         unique.setdefault(_frame_hash(frames[i]), i)
     ids = list(unique.values())
     return [ids[j] for j in np.linspace(0, len(ids) - 1, min(5, len(ids)), dtype=int)]
@@ -51,7 +50,7 @@ def ranking_pairs(scores, *, min_gap=1e-7):
     return pairs
 
 
-def _reference(runtime, record, design, goal_ids):
+def _reference(runtime, record, design, goal_ids, *, domain):
     case = record["case"]
     path = runtime.root / "route_references" / f"{case['case_id']}.pt"
     lineage = dict(runtime_id=runtime.runtime_id, case=case, raw_sha256=record["raw_sha256"])
@@ -63,7 +62,7 @@ def _reference(runtime, record, design, goal_ids):
     raw = experience._read_replay_raw(runtime, record)
     if not raw["success"] or len(raw["frames"]) != record["micro_steps"] + 1:
         raise ValueError("expected the full observations of a successful rollout")
-    ids = eligible_observations(raw["states"], raw["frames"], case, design, goal_ids)
+    ids = eligible_observations(raw["states"], raw["frames"], case, design, goal_ids, domain=domain)
     saved = dict(inputs=lineage, positions=raw["states"][ids, :2].tolist(),
                  steps=raw["primitive_steps"][ids].tolist(),
                  tokens=runtime.encode_frames(raw["frames"][ids]).half() if ids else None)
@@ -72,7 +71,7 @@ def _reference(runtime, record, design, goal_ids):
 
 
 @torch.no_grad()
-def label_failures(runtime, records, design, manifest, adapter, index):
+def label_failures(runtime, records, design, manifest, adapter, index, *, domain):
     """Generate new labels with the incoming cost and freeze them in local replay."""
     failures = [row for row in records if not row["success"] and row["raw_path"] is not None]
     if not failures:
@@ -115,7 +114,7 @@ def label_failures(runtime, records, design, manifest, adapter, index):
                 record = read(runtime.root / "episodes" / source_stage / f"{case['case_id']}.json")
                 if record["case"] != case or record["runtime_id"] != runtime.runtime_id:
                     raise ValueError("successful route record differs from the collection report")
-                payload = _reference(runtime, record, design, goals)
+                payload = _reference(runtime, record, design, goals, domain=domain)
                 if payload["tokens"] is not None:
                     metadata.append((case["case_id"], payload["steps"], payload["positions"]))
                     yield embed(payload["tokens"])
