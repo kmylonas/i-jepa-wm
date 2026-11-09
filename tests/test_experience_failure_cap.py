@@ -19,3 +19,17 @@ def test_cap_never_adds_failure_draws_to_a_success_batch():
     source = [[1, 1], [1, 1]]
     assert cap.capped_schedule(source, [[0, 1, 2], [0, 3, 4]],
                                np.array([True, False]), .15, seed=0).tolist() == source
+
+
+def test_fresh_sampling_caps_cumulative_failure_draws_and_handles_no_successes():
+    from src.mylonas_ijepa_wm import experience_curriculum as experience
+
+    triples = [[0, 2, 3], [1, 4, 5]]
+    fitting = dict(seed=0, updates=5, batch_size=32)
+    draws, stats = experience.capped_replay_draws(triples, [False, True], .15, fitting)
+    counts = (draws == 1).sum(axis=1)
+    assert counts.tolist() == [4, 5, 5, 5, 5]
+    assert stats["failure_draws"] == counts.sum()
+    assert stats["total_draws"] == 160
+    assert stats["failure_pool_pairs"] == 1
+    assert experience.capped_replay_draws(triples, [True, True], .15, fitting)[0] is None

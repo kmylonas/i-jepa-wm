@@ -187,3 +187,25 @@ def test_failure_capture_saves_sparse_frames_and_keeps_the_full_position_trace(t
     assert saved["sampled_failure"] and saved["primitive_steps"].tolist() == [0, 2, 5]
     assert saved["frames"].flatten().tolist() == [0, 2, 5]
     assert len(record["primitive_positions"]) == 6 and len(saved["primitive_actions"]) == 5
+
+
+def test_loop_filter_drops_loop_touching_pairs_before_the_episode_cap():
+    xy = [[40, 12], [42, 12], [42, 15], [42.2, 12], [44, 12], [46, 12], [48, 12]]
+    raw = dict(states=torch.tensor(xy), primitive_steps=torch.arange(len(xy)),
+               frames=torch.arange(len(xy))[:, None], success=True)
+    design = dict(points=[[54, 12]], goal_ids=[], heldout_mask=[False], frame_sha256=["goal"])
+    case = dict(goal=[54, 12], goal_id=0)
+    selected, stats = square.loop_filtered_steps(raw, case, design, 2, radius=.5)
+    assert selected == [3, 5]
+    assert stats["erased_steps"] == [1, 2]
+    assert stats["loop_removed_pairs"] == 3
+
+
+def test_loop_filter_preserves_progress_and_contiguous_slow_moves():
+    xy = [[24, 20], [24, 20.1], [24, 20.3], [24, 30], [32, 30], [38, 30]]
+    raw = dict(states=torch.tensor(xy), primitive_steps=torch.arange(len(xy)),
+               frames=torch.arange(len(xy))[:, None], success=True)
+    design = dict(points=[[48, 30]], goal_ids=[], heldout_mask=[False], frame_sha256=["goal"])
+    selected, stats = square.loop_filtered_steps(raw, dict(goal_id=0), design, 8, radius=.5)
+    assert selected == list(range(5))
+    assert stats["erased_steps"] == []

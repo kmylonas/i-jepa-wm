@@ -12,7 +12,7 @@ from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
 from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, load_stage, run_stage, write_json
 from src.mylonas_ijepa_wm.curriculum_replay import load_adapter, save_adapter
 from src.mylonas_ijepa_wm.curriculum_runtime import EXPECTED_ENCODER, EXPECTED_WM, PilotRuntime, file_sha256, save_tensors
-from src.mylonas_ijepa_wm.multigoal_ranking import GAP, fit, ordinal_rows
+from src.mylonas_ijepa_wm.multigoal_ranking import GAP, draw_reference_batch, fit, ordinal_rows, reference_buckets
 from src.mylonas_ijepa_wm.radial_experiment import locations
 from src.mylonas_ijepa_wm.radial_multigoal_experiment import _scores
 from src.mylonas_ijepa_wm.ranking_planning import _frame_hash, runtime_variant
@@ -94,7 +94,7 @@ def _exclude_protected(xy, inside, case, design):
     return hashes
 
 
-def _select_steps(xy, frames, candidates, inside, case, design, cap):
+def _select_steps(xy, frames, candidates, inside, case, design, cap, *, erased=None):
     hashes = _exclude_protected(xy, inside, case, design)
     eligible = []
     for i in candidates:
@@ -102,9 +102,15 @@ def _select_steps(xy, frames, candidates, inside, case, design, cap):
             before, after = (_frame_hash(frames[j]) for j in (i, i + 1))
             if before != after and not ({before, after} & hashes):
                 eligible.append(int(i))
+    stats = {}
+    if erased is not None:
+        remaining = [i for i in eligible if i not in erased and i + 1 not in erased]
+        stats.update(erased_steps=sorted(erased), loop_removed_pairs=len(eligible) - len(remaining))
+        eligible = remaining
     selected = [eligible[k] for k in np.linspace(0, len(eligible) - 1, min(cap, len(eligible)), dtype=int)]
     return selected, dict(steps=len(xy) - 1, eligible_pairs=len(eligible), retained_pairs=len(selected),
-                          stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
+                          stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()),
+                          **stats)
 
 
 def _filter(raw, case, design, cap, *, geometry=None):
@@ -126,7 +132,7 @@ def _failed_temporal_stats(xy):
                 stationary_steps=int((np.linalg.norm(np.diff(xy, axis=0), axis=1) < 1e-5).sum()))
 
 
-def _temporal_filter(raw, case, design, cap, *, domain=None):
+def _temporal_filter(raw, case, design, cap, *, domain=None, erase_loops=None):
     xy = _observations(raw)
     if not raw["success"]:
         return [], _failed_temporal_stats(xy)
@@ -136,7 +142,8 @@ def _temporal_filter(raw, case, design, cap, *, domain=None):
     else:
         inside = domain(xy)
     candidates = range(raw.get("prefix_steps", 0), len(xy) - 1)
-    selected, stats = _select_steps(xy, raw["frames"], candidates, inside, case, design, cap)
+    erased = None if erase_loops is None else set(range(len(xy))) - set(erase_loops(xy))
+    selected, stats = _select_steps(xy, raw["frames"], candidates, inside, case, design, cap, erased=erased)
     return selected, dict(stats, skipped_failed=False)
 
 
@@ -343,6 +350,24 @@ def _reuse_band1(runtime, manifest, archive):
     return archive["records"], goals, condition
 
 
+def capped_replay_draws(population, failed, fraction, fitting):
+    from src.mylonas_ijepa_wm.experience_failure_cap import capped_schedule
+
+    failed = np.asarray(failed, dtype=bool)
+    stats = dict(pool_pairs=len(failed), failure_pool_pairs=int(failed.sum()),
+                 total_draws=0, failure_draws=0, uncapped_failure_draws=0)
+    if failed.all():
+        return None, stats
+    _, buckets = reference_buckets(np.asarray(population)[:, 0])
+    rng = np.random.default_rng(fitting["seed"])
+    proposed = np.asarray([draw_reference_batch(rng, buckets, fitting["batch_size"])
+                           for _ in range(fitting["updates"])])
+    draws = capped_schedule(proposed, population, failed, fraction, seed=fitting["seed"])
+    stats.update(total_draws=draws.size, failure_draws=int(failed[draws].sum()),
+                 uncapped_failure_draws=int(failed[proposed].sum()))
+    return draws, stats
+
+
 def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
                     filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None,
                     summarize_round_episode=None, sample_failure=None):
@@ -362,6 +387,8 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
         options = dict(sample_failure=sample_failure) if sample_failure is not None else {}
         records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior,
                                                    encode_positions, **options)
+    if "failure_draw_cap" in manifest:
+        print(f"{band}: filtering and encoding {len(records)} rollouts", flush=True)
     rows = []
     for record in records:
         saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps, raw_root=raw_root)
@@ -384,23 +411,38 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
     if derive_scale and prior is not None:
         scale = prior["scale"]
     if new_pairs:
-        token_parts, population, offset = [goals.half()], [], len(goals)
+        population, failed, offset = [], [], len(goals)
         earlier = [read(root / _stage_name(i, rounds) / "complete.json")["collection"] for i in range(index)]
-        for stage_rows in (*earlier, rows):
+        size = offset + sum(len(row["retained_positions"]) for group in (*earlier, rows) for row in group)
+        tokens = torch.empty((size, *goals.shape[1:]), dtype=torch.float16)
+        tokens[:offset] = goals
+        fraction = manifest.get("failure_draw_cap")
+        for i, stage_rows in enumerate((*earlier, rows)):
             for row in stage_rows:
                 if not row["retained_pairs"]:
                     continue
                 case = row["case"]
                 saved = torch.load(root / "replay" / f"{case['case_id']}.pt", map_location="cpu", weights_only=True)
-                token_parts.append(saved["tokens"])
+                chunk = saved["tokens"]
+                tokens[offset:offset + len(chunk)] = chunk
                 population.extend([case["goal_index"], offset + a, offset + b] for a, b in saved["pairs"])
-                offset += len(saved["tokens"])
-        tokens = torch.cat(token_parts)
-        del token_parts
-        if scale is None:
-            scale = _initial_scale(tokens, population)
-        adapter, training = fit(tokens, population, scale, **fitting, device=runtime.device,
-                                initial_adapter=initial, progress=lambda row: print(row, flush=True))
+                failed.extend([not row["success"]] * len(saved["pairs"]))
+                offset += len(chunk)
+            if fraction is not None and (i == index or (i + 1) % rounds == 0):
+                print(f"{band}: loaded local replay through {_stage_name(i, rounds)} ({len(population)} pairs)",
+                      flush=True)
+        draws, sampling = (None, {}) if fraction is None else capped_replay_draws(population, failed, fraction, fitting)
+        if fraction is not None and draws is None:
+            adapter, training = initial, dict(updates=0, reason="no successful pairs in cumulative replay")
+        else:
+            if scale is None:
+                scale = _initial_scale(tokens, population)
+            adapter, training = fit(tokens, population, scale, **fitting, device=runtime.device,
+                                    initial_adapter=initial, sample_schedule=draws,
+                                    progress=lambda row: print(row, flush=True))
+        if sampling:
+            training["replay_sampling"] = sampling
+            print("Replay sampling", sampling, flush=True)
     elif initial is not None or rounds > 1:
         adapter, training = initial, dict(updates=0, reason="no eligible pairs in this collection batch")
     else:

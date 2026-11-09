@@ -40,6 +40,17 @@ def triplet_costs(adapter,tokens,population,*,device='cpu',batch_size=16):
     return tuple(torch.cat(p) for p in parts)
 
 
+def reference_buckets(references):
+    references = np.asarray(references)
+    ids = np.unique(references).tolist()
+    return ids, [np.flatnonzero(references == goal) for goal in ids]
+
+
+def draw_reference_batch(rng, buckets, batch_size):
+    groups = rng.integers(len(buckets), size=batch_size)
+    return [int(rng.choice(buckets[g])) for g in groups]
+
+
 def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=64,lr=1e-4,
         device='cpu',progress=None,initial_adapter=None,sample_schedule=None):
     tokens=tokens.detach().cpu()
@@ -64,8 +75,7 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
         if (initial_adapter.dim,initial_adapter.bottleneck)!=(tokens.shape[-1],bottleneck):
             raise ValueError('initial adapter shape differs from ranking inputs')
         adapter=deepcopy(initial_adapter).to(device).train().requires_grad_(True)
-    reference_ids=torch.unique(population[:,0]).tolist()
-    buckets=[torch.nonzero(population[:,0]==g).flatten().numpy() for g in reference_ids]
+    reference_ids,buckets=reference_buckets(values[:,0])
     probe_ids=np.sort(np.random.default_rng(1729).choice(len(population),min(256,len(population)),replace=False))
     @torch.no_grad()
     def probe():
@@ -79,8 +89,7 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
     farther=torch.zeros_like(endpoints);nearer=torch.zeros_like(endpoints);sampled=[]
     for update in range(1,updates+1):
         if sample_schedule is None:
-            groups=rng.integers(len(buckets),size=batch_size)
-            ids=torch.as_tensor([int(rng.choice(buckets[g])) for g in groups])
+            ids=torch.as_tensor(draw_reference_batch(rng,buckets,batch_size))
         else:
             ids=sample_schedule[update - 1]
         selection=population[ids];sampled.extend(ids.tolist())

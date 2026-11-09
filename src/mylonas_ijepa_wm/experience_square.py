@@ -14,7 +14,7 @@ from src.mylonas_ijepa_wm import geodesic_square as square
 from src.mylonas_ijepa_wm.cost_adapter import adapter_goal_cost
 from src.mylonas_ijepa_wm.curriculum_multiband_protocol import read
 from src.mylonas_ijepa_wm.curriculum_protocol import PLANNING, digest, run_stage, write_json
-from src.mylonas_ijepa_wm.curriculum_runtime import EXPECTED_ENCODER, EXPECTED_WM, PilotRuntime, file_sha256
+from src.mylonas_ijepa_wm.curriculum_runtime import EXPECTED_ENCODER, EXPECTED_WM, PilotRuntime, file_sha256, save_tensors
 from src.mylonas_ijepa_wm.radial_experiment import locations
 from src.mylonas_ijepa_wm.radial_multigoal_experiment import _scores
 from src.mylonas_ijepa_wm.ranking_planning import _frame_hash, runtime_variant
@@ -25,6 +25,11 @@ HALF_WIDTHS = (*square.HALF_WIDTHS[:-1], 48)
 BANDS = tuple(zip((0, *HALF_WIDTHS[:-1]), HALF_WIDTHS))
 SAFE_LOW, SAFE_HIGH = 8., 56.
 FITTING = dict(updates=500, batch_size=32, bottleneck=64, lr=1e-4, seed=0)
+FRESH_RIGHT_GOALS = (
+    (50., 42.), (44.204444885253906, 40.447086334228516), (53., 47.19615173339844),
+    (44.30598068237305, 20.749631881713867), (50., 12.), (50., 16.),
+)
+EXTRA_LEFT_GOALS = ((14., 12.), (23., 30.), (16., 51.))
 
 
 def _room(x):
@@ -165,6 +170,13 @@ def temporal_filter(raw, case, design, cap):
     return experience._temporal_filter(raw, case, design, cap, domain=_legal_positions)
 
 
+def loop_filtered_steps(raw, case, design, cap, *, radius):
+    from src.mylonas_ijepa_wm.experience_loop_filter import loop_erased_steps
+
+    return experience._temporal_filter(raw, case, design, cap, domain=_legal_positions,
+                                       erase_loops=partial(loop_erased_steps, radius=radius))
+
+
 def sample_failed_frames(states, frames, case, design, cap):
     """Keep the start and up to cap distinct later images spread over the failed path."""
     xy = np.asarray(states)[:, :2]
@@ -233,10 +245,19 @@ def make_design(runtime, manifest):
     return design
 
 
-def compare(runtime, manifest, design, *, band_count=None, collection_maps=False):
+def compare(runtime, manifest, design, *, band_count=None, collection_maps=False, single_band=False):
     points = np.asarray(design["points"])
     goals = design["goal_ids"]
-    tokens = experience._encode_positions(runtime, design, list(range(len(points))))
+    cache = runtime.root / "evaluation_grid_tokens.pt"
+    if single_band and cache.exists():
+        saved = torch.load(cache, map_location="cpu", weights_only=True)
+        if saved["runtime_id"] != runtime.runtime_id or saved["design"] != digest(design):
+            raise ValueError("evaluation grid tokens differ from the current design")
+        tokens = saved["tokens"]
+    else:
+        tokens = experience._encode_positions(runtime, design, list(range(len(points))))
+        if single_band:
+            save_tensors(cache, dict(runtime_id=runtime.runtime_id, design=digest(design), tokens=tokens))
     collection_ids = manifest["goal_ids"] if collection_maps else []
     if collection_maps:
         target_path = runtime.root / "collection_goals.pt"
@@ -266,7 +287,8 @@ def compare(runtime, manifest, design, *, band_count=None, collection_maps=False
     stages = []
     rounds = manifest.get("rounds_per_band", 1)
     bands = manifest["bands"][:band_count]
-    for i in range(len(bands) * rounds):
+    start = max(0, (band_count - 1) * rounds - 1) if single_band else 0
+    for i in range(start, len(bands) * rounds):
         band, number = divmod(i, rounds)
         _, outer = bands[band]
         adapter, report = experience._checkpoint(runtime, i, rounds)
@@ -285,7 +307,8 @@ def compare(runtime, manifest, design, *, band_count=None, collection_maps=False
                   raw_grid=grid_values(raw[:len(goals)]), truth_grid=grid_values(truth))
     if collection_maps:
         result["collection_raw_grid"] = grid_values(raw[len(goals):])
-    write_json(runtime.root / "comparison.json", result)
+    name = f"comparison_band_{band_count}.json" if single_band else "comparison.json"
+    write_json(runtime.root / name, result)
     return result
 
 
@@ -344,6 +367,8 @@ def main(argv=None):
     parser.add_argument("--rounds-per-band", type=int, default=1,
                         help="Use two or more rounds for one-macro MPC with success-only temporal labels.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--fresh-loop-curriculum", action="store_true",
+                        help="Use the fixed twelve goals, loop filtering and 15%% failure sampling cap.")
     args = parser.parse_args(argv)
     if args.operation == "stage" and args.band is None:
         parser.error("stage requires --band")
@@ -358,6 +383,11 @@ def main(argv=None):
         parser.error("--failure-pairs must be nonnegative and requires repeated rounds")
     if args.operation == "benchmark" and (args.right_goals_run is None or args.benchmark_run is None):
         parser.error("benchmark requires --right-goals-run and --benchmark-run")
+    if args.fresh_loop_curriculum:
+        if (args.band is None or rounds < 2 or args.right_goals_run is not None or args.extra_left_goal
+                or args.failure_pairs or args.benchmark_run is not None or args.operation == "benchmark"):
+            parser.error("fresh loop curriculum requires --band and repeated rounds, with its own goals and feedback")
+        args.failure_pairs = 4
     sources = [args.world_model_checkpoint, args.dino_wm_root]
     sources.extend(p for p in (args.right_goals_run, args.benchmark_run) if p is not None)
     args.output_dir, _ = locations(args.output_dir, args.encoder_checkpoint, sources)
@@ -366,9 +396,14 @@ def main(argv=None):
     if collection_maps:
         goals = expanded_goals(read(args.right_goals_run / "experiment.json")["manifest"],
                                extra_left=args.extra_left_goal)
+    extra_goal_count = len(args.extra_left_goal)
+    if args.fresh_loop_curriculum:
+        goals = [*make_manifest()["goals"][:3], *map(list, FRESH_RIGHT_GOALS), *map(list, EXTRA_LEFT_GOALS)]
+        extra_goal_count = len(EXTRA_LEFT_GOALS)
+        collection_maps = True
     if rounds > 1:
         manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds, goals=goals,
-                                          extra_goal_count=len(args.extra_left_goal))
+                                          extra_goal_count=extra_goal_count)
         kind = "experience_mpc_more_goals_full_square_v1" if collection_maps else "experience_mpc_repeated_full_square_v1"
     else:
         manifest = make_manifest(args.starts_per_goal)
@@ -378,6 +413,11 @@ def main(argv=None):
         manifest["failure_pair_cap"] = args.failure_pairs
         failure_selector = partial(sample_failed_frames, cap=args.failure_pairs)
         kind = "experience_mpc_failure_feedback_full_square_v1"
+    success_filter = temporal_filter if rounds > 1 else filter_steps
+    if args.fresh_loop_curriculum:
+        kind = "experience_mpc_loop_failure_cap_full_square_v1"
+        manifest.update(failure_draw_cap=.15, loop_radius=.5)
+        success_filter = partial(loop_filtered_steps, radius=manifest["loop_radius"])
     config = dict(kind=kind, manifest=manifest, fitting=FITTING)
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
@@ -398,14 +438,15 @@ def main(argv=None):
             for index in range(first, first + rounds):
                 result = experience.collect_and_fit(
                     runtime, manifest, design, FITTING, None, index,
-                    filter_steps=temporal_filter if rounds > 1 else filter_steps,
+                    filter_steps=success_filter,
                     summarize_round_episode=summarize_round_episode if rounds > 1 else None,
                     sample_failure=failure_selector,
                 )
             return result
         if args.operation == "benchmark":
             return benchmark_band4(runtime, manifest, args.benchmark_run)
-        return compare(runtime, manifest, design, band_count=args.band, collection_maps=collection_maps)
+        return compare(runtime, manifest, design, band_count=args.band, collection_maps=collection_maps,
+                       single_band=args.fresh_loop_curriculum)
     finally:
         runtime.close()
 
