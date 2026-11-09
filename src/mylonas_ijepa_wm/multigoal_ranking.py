@@ -41,7 +41,7 @@ def triplet_costs(adapter,tokens,population,*,device='cpu',batch_size=16):
 
 
 def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=64,lr=1e-4,
-        device='cpu',progress=None,initial_adapter=None):
+        device='cpu',progress=None,initial_adapter=None,sample_schedule=None):
     tokens=tokens.detach().cpu()
     if tokens.dtype!=torch.float16:tokens=tokens.float()
     values=np.asarray(population)
@@ -52,6 +52,11 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
     if (tokens.ndim!=3 or not all(torch.isfinite(chunk).all() for chunk in tokens.split(32)) or updates<1 or batch_size<1
             or bottleneck<1 or not np.isfinite(lr) or lr<=0):raise ValueError('invalid ranking inputs or schedule')
     population=torch.as_tensor(values,dtype=torch.long)
+    if sample_schedule is not None:
+        sample_schedule = torch.as_tensor(sample_schedule, dtype=torch.long)
+        if (sample_schedule.shape != (updates, batch_size)
+                or (sample_schedule < 0).any() or (sample_schedule >= len(population)).any()):
+            raise ValueError("invalid ranking minibatch schedule")
     if initial_adapter is None:
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(seed);adapter=ResidualTokenAdapter(tokens.shape[-1],bottleneck).to(device)
@@ -73,8 +78,11 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
     endpoints=torch.zeros(len(tokens),dtype=torch.long);refs=torch.zeros_like(endpoints)
     farther=torch.zeros_like(endpoints);nearer=torch.zeros_like(endpoints);sampled=[]
     for update in range(1,updates+1):
-        groups=rng.integers(len(buckets),size=batch_size)
-        ids=torch.as_tensor([int(rng.choice(buckets[g])) for g in groups])
+        if sample_schedule is None:
+            groups=rng.integers(len(buckets),size=batch_size)
+            ids=torch.as_tensor([int(rng.choice(buckets[g])) for g in groups])
+        else:
+            ids=sample_schedule[update - 1]
         selection=population[ids];sampled.extend(ids.tolist())
         endpoints+=torch.bincount(selection.flatten(),minlength=len(tokens))
         refs+=torch.bincount(selection[:,0],minlength=len(tokens))
@@ -94,7 +102,8 @@ def fit(tokens,population,scale,*,seed=0,updates=2000,batch_size=32,bottleneck=6
     return adapter,dict(seed=seed,updates=updates,batch_size=batch_size,bottleneck=bottleneck,lr=lr,
         initialization='identity' if initial_adapter is None else 'previous_adapter',anchor_weight=0,scale=float(scale),margin=MARGIN,min_physical_gap=GAP,
         objective='ranking',loss='mean(softplus(0.2-(far_cost-near_cost)/scale))',
-        sampling='uniform_reference_then_uniform_valid_comparison',eligible_triples=len(population),
+        sampling=('uniform_reference_then_uniform_valid_comparison' if sample_schedule is None
+                  else 'provided_minibatch_schedule'),eligible_triples=len(population),
         reference_ids=reference_ids,reference_counts=refs.tolist(),endpoint_counts=endpoints.tolist(),
         far_counts=farther.tolist(),near_counts=nearer.tolist(),
         sampled_triplet_ids=sampled,probe_triplet_ids=probe_ids.tolist(),
