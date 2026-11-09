@@ -167,23 +167,14 @@ def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root
     root = runtime.root
     path = root / "replay" / f"{case['case_id']}.pt"
     lineage = dict(runtime_id=runtime.runtime_id, case=case, raw_sha256=record["raw_sha256"])
-    source_runtime_id = runtime.runtime_id if raw_root is None else record["runtime_id"]
     if raw_root is not None:
-        lineage["source_runtime_id"] = source_runtime_id
+        lineage["source_runtime_id"] = record["runtime_id"]
     if path.exists():
         saved = torch.load(path, map_location="cpu", weights_only=True)
         if saved["inputs"] != lineage:
             raise ValueError(f"replay provenance differs for {case['case_id']}")
         return saved
-    source = root if raw_root is None else raw_root
-    raw_path = (source / record["raw_path"]).resolve()
-    raw_path.relative_to(source.resolve())
-    if file_sha256(raw_path) != record["raw_sha256"]:
-        raise ValueError(f"raw observations changed for {case['case_id']}")
-    raw = torch.load(raw_path, map_location="cpu", weights_only=True)
-    if (raw["case"] != case or raw["runtime_id"] != source_runtime_id
-            or (raw_root is not None and raw["success"] != record["success"])):
-        raise ValueError("raw observations do not match the completed rollout")
+    raw = _read_replay_raw(runtime, record, raw_root=raw_root)
     if raw.get("sampled_failure"):
         steps = raw["primitive_steps"].tolist()
         cap = manifest.get("failure_pair_cap", 0)
@@ -208,6 +199,20 @@ def _replay(runtime, record, design, manifest, *, filter_steps=_filter, raw_root
                    tokens=runtime.encode_frames(raw["frames"][ids]).half() if ids else None)
     save_tensors(path, payload)
     return payload
+
+
+def _read_replay_raw(runtime, record, *, raw_root=None):
+    source = runtime.root if raw_root is None else raw_root
+    raw_path = (source / record["raw_path"]).resolve()
+    raw_path.relative_to(source.resolve())
+    if file_sha256(raw_path) != record["raw_sha256"]:
+        raise ValueError(f"raw observations changed for {case['case_id']}")
+    raw = torch.load(raw_path, map_location="cpu", weights_only=True)
+    source_runtime_id = runtime.runtime_id if raw_root is None else record["runtime_id"]
+    if (raw["case"] != record["case"] or raw["runtime_id"] != source_runtime_id
+            or (raw_root is not None and raw["success"] != record["success"])):
+        raise ValueError("raw observations do not match the completed rollout")
+    return raw
 
 
 def repeat_manifest(first, later):
@@ -370,7 +375,7 @@ def capped_replay_draws(population, failed, fraction, fitting):
 
 def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
                     filter_steps=_filter, encode_positions=_encode_positions, raw_band1=None,
-                    summarize_round_episode=None, sample_failure=None):
+                    summarize_round_episode=None, sample_failure=None, rank_failures=None):
     root = runtime.root
     rounds = manifest.get("rounds_per_band", 1)
     band_number, round_number = divmod(index, rounds)
@@ -387,11 +392,15 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
         options = dict(sample_failure=sample_failure) if sample_failure is not None else {}
         records, goals, condition = _collect_band(runtime, manifest, design, index, initial, prior,
                                                    encode_positions, **options)
-    if "failure_draw_cap" in manifest:
+    if "failure_draw_cap" in manifest or rank_failures is not None:
         print(f"{band}: filtering and encoding {len(records)} rollouts", flush=True)
+    ranked = rank_failures(runtime, records, design, manifest, initial, index) if rank_failures else {}
     rows = []
     for record in records:
-        saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps, raw_root=raw_root)
+        case_id = record["case"]["case_id"]
+        saved = ranked.pop(case_id, None)
+        if saved is None:
+            saved = _replay(runtime, record, design, manifest, filter_steps=filter_steps, raw_root=raw_root)
         row = dict(case=record["case"], success=record["success"],
                    **saved["stats"], retained_positions=saved["positions"].tolist())
         if "exploration" in manifest:
@@ -428,7 +437,7 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
                 population.extend([case["goal_index"], offset + a, offset + b] for a, b in saved["pairs"])
                 failed.extend([not row["success"]] * len(saved["pairs"]))
                 offset += len(chunk)
-            if fraction is not None and (i == index or (i + 1) % rounds == 0):
+            if (fraction is not None or rank_failures is not None) and (i == index or (i + 1) % rounds == 0):
                 print(f"{band}: loaded local replay through {_stage_name(i, rounds)} ({len(population)} pairs)",
                       flush=True)
         draws, sampling = (None, {}) if fraction is None else capped_replay_draws(population, failed, fraction, fitting)
@@ -440,6 +449,10 @@ def collect_and_fit(runtime, manifest, design, fitting, scale, index, *,
             adapter, training = fit(tokens, population, scale, **fitting, device=runtime.device,
                                     initial_adapter=initial, sample_schedule=draws,
                                     progress=lambda row: print(row, flush=True))
+            if rank_failures is not None:
+                sampled = np.asarray(training["sampled_triplet_ids"])
+                sampling = dict(pool_pairs=len(failed), failure_pool_pairs=sum(failed),
+                                total_draws=len(sampled), failure_draws=int(np.asarray(failed)[sampled].sum()))
         if sampling:
             training["replay_sampling"] = sampling
             print("Replay sampling", sampling, flush=True)

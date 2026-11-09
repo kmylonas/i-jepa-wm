@@ -57,7 +57,7 @@ def _rectangles(goal, inner, outer, *, regions=None):
     return np.asarray(rectangles).reshape(-1, 2, 2)
 
 
-def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None, extra_goal_count=0):
+def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None, extra_goal_count=0, reset_region=None):
     if starts_per_goal < 1:
         raise ValueError("starts per goal must be positive")
     rng = np.random.default_rng(SEED)
@@ -70,12 +70,13 @@ def make_manifest(starts_per_goal=6, *, round_seed=0, goals=None, extra_goal_cou
         rng = np.random.default_rng([SEED, round_seed])
     # Appended goals should not change the saved protocol's starts or CEM seeds.
     extra_rng = np.random.default_rng([SEED, round_seed, 1]) if extra_goal_count else rng
+    regions = (reset_region,) if reset_region is not None else None
     stages = []
     for index, (inner, outer) in enumerate(BANDS):
         cases = []
         for g, goal in enumerate(goals):
             sampler = rng if g < len(goals) - extra_goal_count else extra_rng
-            rectangles = _rectangles(goal, inner, outer)
+            rectangles = _rectangles(goal, inner, outer, regions=regions)
             if not len(rectangles):
                 continue
             areas = np.prod(rectangles[:, 1] - rectangles[:, 0], axis=1)
@@ -115,10 +116,11 @@ def expanded_goals(right_manifest, *, extra_left=()):
     return [*left, *(right[i] for i in range(6)), *extra]
 
 
-def make_repeated_manifest(starts_per_goal, *, rounds, goals=None, extra_goal_count=0):
-    first = make_manifest(starts_per_goal, goals=goals, extra_goal_count=extra_goal_count)
+def make_repeated_manifest(starts_per_goal, *, rounds, goals=None, extra_goal_count=0, reset_region=None):
+    options = dict(goals=goals, extra_goal_count=extra_goal_count, reset_region=reset_region)
+    first = make_manifest(starts_per_goal, **options)
     first["planning"].update(planning_horizon=1, actions_per_plan=1)
-    later = (make_manifest(starts_per_goal, round_seed=number, goals=goals, extra_goal_count=extra_goal_count)
+    later = (make_manifest(starts_per_goal, round_seed=number, **options)
              for number in range(1, rounds))
     return experience.repeat_manifest(first, later)
 
@@ -170,10 +172,10 @@ def temporal_filter(raw, case, design, cap):
     return experience._temporal_filter(raw, case, design, cap, domain=_legal_positions)
 
 
-def loop_filtered_steps(raw, case, design, cap, *, radius):
+def loop_filtered_steps(raw, case, design, cap, *, radius, domain=_legal_positions):
     from src.mylonas_ijepa_wm.experience_loop_filter import loop_erased_steps
 
-    return experience._temporal_filter(raw, case, design, cap, domain=_legal_positions,
+    return experience._temporal_filter(raw, case, design, cap, domain=domain,
                                        erase_loops=partial(loop_erased_steps, radius=radius))
 
 
@@ -367,8 +369,11 @@ def main(argv=None):
     parser.add_argument("--rounds-per-band", type=int, default=1,
                         help="Use two or more rounds for one-macro MPC with success-only temporal labels.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
-    parser.add_argument("--fresh-loop-curriculum", action="store_true",
-                        help="Use the fixed twelve goals, loop filtering and 15%% failure sampling cap.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--fresh-loop-curriculum", action="store_true",
+                      help="Use the fixed twelve goals, loop filtering and 15%% failure sampling cap.")
+    mode.add_argument("--half-route-feedback", action="store_true",
+                      help="Use the right room and rank failed observations against successful routes.")
     args = parser.parse_args(argv)
     if args.operation == "stage" and args.band is None:
         parser.error("stage requires --band")
@@ -383,16 +388,18 @@ def main(argv=None):
         parser.error("--failure-pairs must be nonnegative and requires repeated rounds")
     if args.operation == "benchmark" and (args.right_goals_run is None or args.benchmark_run is None):
         parser.error("benchmark requires --right-goals-run and --benchmark-run")
-    if args.fresh_loop_curriculum:
+    if args.fresh_loop_curriculum or args.half_route_feedback:
         if (args.band is None or rounds < 2 or args.right_goals_run is not None or args.extra_left_goal
                 or args.failure_pairs or args.benchmark_run is not None or args.operation == "benchmark"):
-            parser.error("fresh loop curriculum requires --band and repeated rounds, with its own goals and feedback")
-        args.failure_pairs = 4
+            parser.error("fresh curricula require --band and repeated rounds, with their own goals and feedback")
+        if args.fresh_loop_curriculum:
+            args.failure_pairs = 4
     sources = [args.world_model_checkpoint, args.dino_wm_root]
     sources.extend(p for p in (args.right_goals_run, args.benchmark_run) if p is not None)
     args.output_dir, _ = locations(args.output_dir, args.encoder_checkpoint, sources)
     collection_maps = args.right_goals_run is not None
     goals = None
+    reset_region = None
     if collection_maps:
         goals = expanded_goals(read(args.right_goals_run / "experiment.json")["manifest"],
                                extra_left=args.extra_left_goal)
@@ -401,14 +408,21 @@ def main(argv=None):
         goals = [*make_manifest()["goals"][:3], *map(list, FRESH_RIGHT_GOALS), *map(list, EXTRA_LEFT_GOALS)]
         extra_goal_count = len(EXTRA_LEFT_GOALS)
         collection_maps = True
+    if args.half_route_feedback:
+        from src.mylonas_ijepa_wm import experience_half_square, experience_route_feedback
+
+        goals = list(map(list, FRESH_RIGHT_GOALS))
+        reset_region = experience_half_square.RESET_REGION
+        collection_maps = True
     if rounds > 1:
         manifest = make_repeated_manifest(args.starts_per_goal, rounds=rounds, goals=goals,
-                                          extra_goal_count=extra_goal_count)
+                                          extra_goal_count=extra_goal_count, reset_region=reset_region)
         kind = "experience_mpc_more_goals_full_square_v1" if collection_maps else "experience_mpc_repeated_full_square_v1"
     else:
         manifest = make_manifest(args.starts_per_goal)
         kind = "experience_square_v1"
     failure_selector = None
+    rank_failures = None
     if args.failure_pairs:
         manifest["failure_pair_cap"] = args.failure_pairs
         failure_selector = partial(sample_failed_frames, cap=args.failure_pairs)
@@ -418,6 +432,13 @@ def main(argv=None):
         kind = "experience_mpc_loop_failure_cap_full_square_v1"
         manifest.update(failure_draw_cap=.15, loop_radius=.5)
         success_filter = partial(loop_filtered_steps, radius=manifest["loop_radius"])
+    if args.half_route_feedback:
+        kind = "experience_mpc_route_feedback_half_square_v1"
+        manifest.update(reset_region=list(reset_region), loop_radius=.5)
+        success_filter = partial(loop_filtered_steps, radius=manifest["loop_radius"],
+                                 domain=experience_half_square._right_room)
+        failure_selector = partial(experience_route_feedback.sample_frames, goal_ids=manifest["goal_ids"])
+        rank_failures = experience_route_feedback.label_failures
     config = dict(kind=kind, manifest=manifest, fitting=FITTING)
     path = args.output_dir / "experiment.json"
     if path.exists() and read(path) != config:
@@ -441,12 +462,13 @@ def main(argv=None):
                     filter_steps=success_filter,
                     summarize_round_episode=summarize_round_episode if rounds > 1 else None,
                     sample_failure=failure_selector,
+                    rank_failures=rank_failures,
                 )
             return result
         if args.operation == "benchmark":
             return benchmark_band4(runtime, manifest, args.benchmark_run)
         return compare(runtime, manifest, design, band_count=args.band, collection_maps=collection_maps,
-                       single_band=args.fresh_loop_curriculum)
+                       single_band=args.fresh_loop_curriculum or args.half_route_feedback)
     finally:
         runtime.close()
 

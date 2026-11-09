@@ -209,3 +209,28 @@ def test_loop_filter_preserves_progress_and_contiguous_slow_moves():
     selected, stats = square.loop_filtered_steps(raw, dict(goal_id=0), design, 8, radius=.5)
     assert selected == list(range(5))
     assert stats["erased_steps"] == []
+
+
+def test_failed_route_scores_take_one_match_per_success_and_rank_in_both_directions():
+    from src.mylonas_ijepa_wm import experience_route_feedback as routes
+
+    failed = torch.tensor([[3.], [1.], [6.]])
+    successes = [torch.tensor([[0.], [0.], [0.]]), torch.tensor([[1.]]),
+                 torch.tensor([[2.]]), torch.tensor([[10.]])]
+    scores, matches = routes.route_scores(failed, successes, top=3)
+    assert np.allclose(scores, [14 / 3, 2 / 3, 19])
+    assert matches[0] == [(2, 0), (1, 0), (0, 0)]
+    assert routes.ranking_pairs(scores) == [(0, 1), (2, 0), (2, 1)]
+    assert routes.ranking_pairs([1., 1. + 1e-9]) == []
+    assert routes.route_scores(failed, successes[:2], top=3) is None
+
+
+def test_route_feedback_samples_five_distinct_frames_across_failure():
+    from src.mylonas_ijepa_wm import experience_route_feedback as routes
+
+    xy = [[44, 12 + i] for i in range(11)]
+    frames = np.asarray([[i] for i in (0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)])
+    case = dict(goal_index=0)
+    design = dict(points=[[50, 12]], goal_ids=[], heldout_mask=[False], frame_sha256=["goal"])
+    assert routes.sample_frames(xy, frames, case, design, [0]) == [0, 3, 5, 7, 10]
+    assert routes.sample_frames(xy[:2], frames[:2], case, design, [0]) == [0]
