@@ -88,7 +88,7 @@ def run(source, output, encoder, world_model, dino_root, device):
     if ({tuple(case["start"]) for case in cases} & trained_starts
             or set(TEST_GOALS) & {tuple(goal) for goal in training["goals"]}):
         raise ValueError("evaluation starts and goals must be held out from training")
-    manifest = dict(evaluation=cases, planning=dict(training["planning"], max_macro_steps=7))
+    manifest = dict(evaluation=cases, planning=dict(training["planning"], max_macro_steps=20))
     experiment = dict(kind="grid_route_planning_v1", source=origin, manifest=manifest)
     config_path = output / "experiment.json"
     if config_path.exists() and read(config_path) != experiment:
